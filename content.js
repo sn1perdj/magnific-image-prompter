@@ -60,11 +60,15 @@ async function executeWorkflowStep(promptText, promptNumber) {
     const latestImg = images[0];
     
     // Ensure filename ends in .jpg or .png (depending on the source if you want, but defaulting to .jpg works for most AI gens)
-    chrome.runtime.sendMessage({
+    const downloadResponse = await sendRuntimeMessage({
       action: 'trigger_browser_download',
       url: latestImg.src,
       filename: `${promptNumber}.jpg`
     });
+
+    if (!downloadResponse || !downloadResponse.success) {
+      throw new Error(downloadResponse && downloadResponse.error ? downloadResponse.error : 'Download failed to start');
+    }
   } else {
     throw new Error('Could not find the generated image to download');
   }
@@ -75,6 +79,19 @@ async function executeWorkflowStep(promptText, promptNumber) {
 // Helper Functions
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      resolve(response);
+    });
+  });
 }
 
 async function waitForElementToAppear(selector, timeoutMs) {

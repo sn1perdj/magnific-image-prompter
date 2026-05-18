@@ -1,12 +1,28 @@
+const WORKFLOW_STORAGE_KEY = 'magnificWorkflowState';
+const MAX_RECOVERY_ATTEMPTS = 5;
+const RECOVERY_RELOAD_DELAY_MS = 3000;
+let restoreStarted = false;
+
 let workflowState = {
   active: false,
   prompts: [],
   currentIndex: 0,
+  startIndexOffset: 0,
   baseUrl: '',
-  tabId: null
+  colLetter: 'E',
+  tabId: null,
+  status: 'Ready',
+  retryCount: 0
 };
 
+restoreWorkflowState();
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'get_state') {
+    sendResponse(workflowState);
+    return true;
+  }
+  
   if (message.action === 'start_workflow') {
     workflowState = {
       active: true,
@@ -14,17 +30,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       currentIndex: 0,
       startIndexOffset: message.startIndexOffset || 0,
       baseUrl: message.baseUrl,
-      tabId: null
+      colLetter: message.colLetter || 'E',
+      tabId: null,
+      status: `Starting Column ${message.colLetter || 'E'}...`,
+      retryCount: 0
     };
+    persistWorkflowState();
 
     chrome.tabs.query({ url: "*://*.magnific.com/*" }, (tabs) => {
       if (tabs.length > 0) {
         workflowState.tabId = tabs[0].id;
-        chrome.tabs.update(workflowState.tabId, { url: workflowState.baseUrl });
-        waitForTabLoad(workflowState.tabId, processNextPrompt);
+        persistWorkflowState();
+        chrome.tabs.update(workflowState.tabId, { url: workflowState.baseUrl }, () => {
+          waitForTabLoad(workflowState.tabId, processNextPrompt);
+        });
       } else {
         chrome.tabs.create({ url: workflowState.baseUrl }, (tab) => {
           workflowState.tabId = tab.id;
+          persistWorkflowState();
           waitForTabLoad(workflowState.tabId, processNextPrompt);
         });
       }
@@ -36,7 +59,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.downloads.download({
       url: message.url,
       filename: message.filename
+    }, (downloadId) => {
+      if (chrome.runtime.lastError || !downloadId) {
+        sendResponse({
+          success: false,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Download did not start'
+        });
+        return;
+      }
+
+      sendResponse({ success: true, downloadId });
     });
+    return true;
   }
 });
 
@@ -44,44 +78,142 @@ function processNextPrompt() {
   if (!workflowState.active) return;
   if (workflowState.currentIndex >= workflowState.prompts.length) {
     updateStatus('All prompts processed successfully!', true);
-    workflowState.active = false;
     return;
   }
 
   const prompt = workflowState.prompts[workflowState.currentIndex];
   const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
 
-  // Skip empty rows (e.g. if G5 was empty)
+  // Skip empty rows (e.g. if E5/F5/G5 was empty)
   if (!prompt || prompt.trim() === '') {
     workflowState.currentIndex++;
+    workflowState.retryCount = 0;
+    persistWorkflowState();
     processNextPrompt(); // go to next immediately
     return;
   }
 
-  updateStatus(`Processing prompt G${visualPromptNumber}...`);
+  updateStatus(`Processing prompt ${workflowState.colLetter}${visualPromptNumber}...`);
 
   // Wait a bit before starting to ensure UI is ready
   setTimeout(() => {
     if (!workflowState.active) return;
     chrome.tabs.sendMessage(workflowState.tabId, { action: 'execute_step', prompt: prompt, promptNumber: visualPromptNumber }, (response) => {
+      if (chrome.runtime.lastError) {
+        recoverFromError(`No page response: ${chrome.runtime.lastError.message || 'Unknown error'}`);
+        return;
+      }
+
       if (response && response.success) {
         workflowState.currentIndex++;
+        workflowState.retryCount = 0;
+        persistWorkflowState();
         // Short pause before the next prompt
         setTimeout(processNextPrompt, 2000);
       } else {
-        updateStatus(`Error on prompt G${visualPromptNumber}: ${response ? response.error : 'No response'}`, true);
-        workflowState.active = false;
+        recoverFromError(response ? response.error : 'No response');
       }
     });
   }, 2000);
 }
 
+function recoverFromError(errorMessage) {
+  if (!workflowState.active) return;
+
+  workflowState.retryCount = (workflowState.retryCount || 0) + 1;
+  const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
+
+  if (workflowState.retryCount > MAX_RECOVERY_ATTEMPTS) {
+    updateStatus(`Stopped after ${MAX_RECOVERY_ATTEMPTS} reload attempts on ${workflowState.colLetter}${visualPromptNumber}: ${errorMessage}`, true);
+    return;
+  }
+
+  updateStatus(`Issue on ${workflowState.colLetter}${visualPromptNumber}. Hard reloading and resuming from here... (${workflowState.retryCount}/${MAX_RECOVERY_ATTEMPTS})`);
+  persistWorkflowState();
+
+  reloadWorkflowTab(() => {
+    if (!workflowState.active) return;
+    setTimeout(processNextPrompt, RECOVERY_RELOAD_DELAY_MS);
+  });
+}
+
+function reloadWorkflowTab(callback) {
+  const reloadCurrentTab = () => {
+    chrome.tabs.reload(workflowState.tabId, { bypassCache: true }, () => {
+      if (chrome.runtime.lastError) {
+        chrome.tabs.create({ url: workflowState.baseUrl }, (tab) => {
+          workflowState.tabId = tab.id;
+          persistWorkflowState();
+          waitForTabLoad(workflowState.tabId, callback);
+        });
+        return;
+      }
+      waitForTabLoad(workflowState.tabId, callback);
+    });
+  };
+
+  if (workflowState.tabId) {
+    reloadCurrentTab();
+    return;
+  }
+
+  chrome.tabs.query({ url: "*://*.magnific.com/*" }, (tabs) => {
+    if (tabs.length > 0) {
+      workflowState.tabId = tabs[0].id;
+      persistWorkflowState();
+      reloadCurrentTab();
+    } else {
+      chrome.tabs.create({ url: workflowState.baseUrl }, (tab) => {
+        workflowState.tabId = tab.id;
+        persistWorkflowState();
+        waitForTabLoad(workflowState.tabId, callback);
+      });
+    }
+  });
+}
+
+function ensureWorkflowRunning() {
+  if (restoreStarted || !workflowState.active || !workflowState.baseUrl) return;
+  restoreStarted = true;
+  reloadWorkflowTab(() => {
+    restoreStarted = false;
+    processNextPrompt();
+  });
+}
+
+function restoreWorkflowState() {
+  chrome.storage.local.get([WORKFLOW_STORAGE_KEY], (result) => {
+    const savedState = result[WORKFLOW_STORAGE_KEY];
+    if (!savedState || !savedState.active) return;
+
+    workflowState = {
+      ...workflowState,
+      ...savedState,
+      status: savedState.status || 'Restoring workflow...',
+      retryCount: savedState.retryCount || 0
+    };
+    ensureWorkflowRunning();
+  });
+}
+
+function persistWorkflowState() {
+  chrome.storage.local.set({ [WORKFLOW_STORAGE_KEY]: workflowState });
+}
+
 function updateStatus(status, done = false) {
+  workflowState.status = status;
+  if (done) workflowState.active = false;
+  persistWorkflowState();
   chrome.runtime.sendMessage({ action: 'update_status', status, done });
 }
 
 function waitForTabLoad(tabId, callback) {
   chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab) {
+      reloadWorkflowTab(callback);
+      return;
+    }
+
     if (tab.status === 'complete') {
       callback();
     } else {

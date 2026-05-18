@@ -13,6 +13,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const singlePromptInput = document.getElementById('singlePrompt');
   const statusBox = document.getElementById('status');
 
+  const TAB_COLUMNS = {
+    character: { index: 0, letter: 'E' },
+    location: { index: 0, letter: 'F' },
+    image: { index: 0, letter: 'G' }
+  };
+
+  let activeTab = 'character';
+  const tabButtons = document.querySelectorAll('.tab');
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeTab = btn.getAttribute('data-tab');
+    });
+  });
+
   let currentSheetLink = '';
 
   // Load saved link
@@ -21,6 +37,35 @@ document.addEventListener('DOMContentLoaded', () => {
       currentSheetLink = result.magnificSheetLink;
       sheetLinkInput.value = currentSheetLink;
     }
+  });
+
+  // Restore UI state
+  chrome.runtime.sendMessage({ action: 'get_state' }, (state) => {
+    if (state && state.active) {
+      startBtn.style.display = 'none';
+      stopBtn.style.display = 'block';
+      stopBtn.disabled = false;
+      statusBox.textContent = state.status;
+      
+      let runningTab = 'character';
+      if (state.colLetter === 'F') runningTab = 'location';
+      if (state.colLetter === 'G') runningTab = 'image';
+      
+      tabButtons.forEach(b => b.classList.remove('active'));
+      const activeBtn = document.querySelector(`.tab[data-tab="${runningTab}"]`);
+      if (activeBtn) activeBtn.classList.add('active');
+      activeTab = runningTab;
+    } else if (state && state.status) {
+      statusBox.textContent = state.status;
+    }
+  });
+
+  // Clear the other input when one is clicked to prevent conflicting logic
+  startFromInput.addEventListener('input', () => {
+    if (startFromInput.value) singlePromptInput.value = '';
+  });
+  singlePromptInput.addEventListener('input', () => {
+    if (singlePromptInput.value) startFromInput.value = '';
   });
 
   settingsBtn.addEventListener('click', () => {
@@ -47,7 +92,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    statusBox.textContent = 'Fetching Google Sheet...';
+    const selectedColumn = TAB_COLUMNS[activeTab] || TAB_COLUMNS.character;
+    const colLetter = selectedColumn.letter;
+
+    statusBox.textContent = `Fetching Column ${colLetter}...`;
     startBtn.disabled = true;
 
     try {
@@ -55,23 +103,26 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!sheetIdMatch) throw new Error('Could not extract Sheet ID');
       const sheetId = sheetIdMatch[1];
       
-      let csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+      const csvUrl = new URL(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq`);
+      csvUrl.searchParams.set('tqx', 'out:csv');
+      csvUrl.searchParams.set('range', `${colLetter}:${colLetter}`);
       
       // Extract gid (Sheet tab ID) if present
       const gidMatch = currentSheetLink.match(/[#&?]gid=([0-9]+)/);
       if (gidMatch) {
-        csvUrl += `&gid=${gidMatch[1]}`;
+        csvUrl.searchParams.set('gid', gidMatch[1]);
       }
       
-      const response = await fetch(csvUrl);
+      const response = await fetch(csvUrl.toString());
       if (!response.ok) throw new Error('Failed to fetch sheet. Is it public?');
       
       const csvText = await response.text();
-      // Returns an array where index 0 is G1, index 1 is G2, etc. Preserves empty rows.
-      const prompts = parseCsvColumn(csvText, 6); 
+
+      // The request above fetches only the selected sheet column, so parse column 0.
+      const prompts = parseCsvColumn(csvText, selectedColumn.index); 
       
       if (prompts.length === 0) {
-        throw new Error('No prompts found in Column G');
+        throw new Error(`No prompts found in Column ${colLetter}`);
       }
 
       const singlePromptVal = parseInt(singlePromptInput.value, 10);
@@ -80,14 +131,14 @@ document.addEventListener('DOMContentLoaded', () => {
       let promptsToProcess = prompts;
       let startIndex = 0;
 
-      if (!isNaN(singlePromptVal) && singlePromptVal > 0) {
-        // Run ONLY this single prompt (e.g. 69 means G69, which is index 68)
-        startIndex = singlePromptVal - 1;
-        promptsToProcess = prompts.slice(startIndex, startIndex + 1);
-      } else if (!isNaN(startFromVal) && startFromVal > 0) {
-        // Run starting from this prompt (e.g. 15 means G15, which is index 14)
+      if (!isNaN(startFromVal) && startFromVal > 0) {
+        // Run starting from this prompt (e.g. 15 means E15/F15/G15, which is index 14)
         startIndex = startFromVal - 1;
         promptsToProcess = prompts.slice(startIndex);
+      } else if (!isNaN(singlePromptVal) && singlePromptVal > 0) {
+        // Run ONLY this single prompt (e.g. 69 means E69/F69/G69, which is index 68)
+        startIndex = singlePromptVal - 1;
+        promptsToProcess = prompts.slice(startIndex, startIndex + 1);
       }
 
       statusBox.textContent = `Starting... (${promptsToProcess.length} prompts)`;
@@ -99,7 +150,8 @@ document.addEventListener('DOMContentLoaded', () => {
         action: 'start_workflow',
         prompts: promptsToProcess,
         startIndexOffset: startIndex, // To show correct prompt # in UI
-        baseUrl: 'https://www.magnific.com/app/ai-image-generator#from_element=mainmenu&from_view=pinned_tool'
+        baseUrl: 'https://www.magnific.com/app/ai-image-generator#from_element=mainmenu&from_view=pinned_tool',
+        colLetter: colLetter
       });
     } catch (err) {
       statusBox.textContent = err.message;
@@ -160,6 +212,6 @@ function parseCsvColumn(csvText, colIndex) {
     rows.push(currentRow);
   }
 
-  // Extract column G, return empty string if cell is empty so indices match row numbers
+  // Extract column, return empty string if cell is empty so indices match row numbers
   return rows.map(row => row[colIndex] ? row[colIndex].trim() : '');
 }
