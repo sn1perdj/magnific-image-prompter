@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Magnific Automator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-background"></div>
+  
+  <div class="container" id="mainView">
+    <div class="header">
+      <div class="brand">
+        <div class="logo-glow"></div>
+        <h2>Magnific Pro</h2>
+      </div>
+      <button id="settingsBtn" class="icon-btn" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </button>
+    </div>
+    
+    <div class="card">
+      <div class="section">
+        <label for="startFrom">Start from Prompt # <span class="optional-badge">Optional</span></label>
+        <div class="input-wrapper">
+          <input type="number" id="startFrom" placeholder="e.g. 15 for G15" class="input-field">
+        </div>
+      </div>
+
+      <div class="section">
+        <label for="singlePrompt">Run Single Prompt # <span class="optional-badge">Optional</span></label>
+        <div class="input-wrapper">
+          <input type="number" id="singlePrompt" placeholder="e.g. 69 for G69" class="input-field">
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="startBtn" class="btn primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        Start Processing
+      </button>
+      <button id="stopBtn" class="btn danger" style="display: none;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>
+        Stop Automation
+      </button>
+    </div>
+    
+    <div id="status" class="status-box">Ready</div>
+  </div>
+
+  <div class="container" id="settingsView" style="display: none;">
+    <div class="header">
+      <h2>Settings</h2>
+      <button id="backBtn" class="icon-btn" title="Back">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+      </button>
+    </div>
+    
+    <div class="card">
+      <div class="section">
+        <label for="sheetLink">Google Sheet Link</label>
+        <div class="input-wrapper">
+          <input type="text" id="sheetLink" placeholder="https://docs.google.com/spreadsheets/d/..." class="input-field">
+        </div>
+        <p class="help-text">Ensure the link is set to "Anyone with the link can view".</p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="saveSettingsBtn" class="btn primary">Save & Back</button>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
