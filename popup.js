@@ -11,7 +11,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const sheetLinkInput = document.getElementById('sheetLink');
   const startFromInput = document.getElementById('startFrom');
   const singlePromptInput = document.getElementById('singlePrompt');
+  const refImageNumInput = document.getElementById('refImageNum');
   const statusBox = document.getElementById('status');
+
+  function saveInputs() {
+    chrome.storage.local.set({
+      savedStartFrom: startFromInput.value,
+      savedSinglePrompt: singlePromptInput.value,
+      savedRefImageNum: refImageNumInput.value,
+      savedActiveTab: activeTab
+    });
+  }
 
   const TAB_COLUMNS = {
     character: { index: 0, letter: 'E' },
@@ -21,21 +31,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let activeTab = 'character';
   const tabButtons = document.querySelectorAll('.tab');
+  const refImageSection = document.getElementById('refImageSection');
+  
   tabButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       tabButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       activeTab = btn.getAttribute('data-tab');
+      
+      if (activeTab === 'image') {
+        if (refImageSection) refImageSection.style.display = 'block';
+      } else {
+        if (refImageSection) refImageSection.style.display = 'none';
+      }
+      saveInputs();
     });
   });
 
   let currentSheetLink = '';
 
-  // Load saved link
-  chrome.storage.local.get(['magnificSheetLink'], (result) => {
+  // Load saved link and inputs
+  chrome.storage.local.get([
+    'magnificSheetLink', 
+    'savedStartFrom', 
+    'savedSinglePrompt', 
+    'savedRefImageNum', 
+    'savedActiveTab'
+  ], (result) => {
     if (result.magnificSheetLink) {
       currentSheetLink = result.magnificSheetLink;
       sheetLinkInput.value = currentSheetLink;
+    }
+    
+    if (result.savedStartFrom !== undefined) startFromInput.value = result.savedStartFrom;
+    if (result.savedSinglePrompt !== undefined) singlePromptInput.value = result.savedSinglePrompt;
+    if (result.savedRefImageNum !== undefined) refImageNumInput.value = result.savedRefImageNum;
+    
+    if (result.savedActiveTab) {
+      const btnToActivate = document.querySelector(`.tab[data-tab="${result.savedActiveTab}"]`);
+      if (btnToActivate) btnToActivate.click();
     }
   });
 
@@ -55,6 +89,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const activeBtn = document.querySelector(`.tab[data-tab="${runningTab}"]`);
       if (activeBtn) activeBtn.classList.add('active');
       activeTab = runningTab;
+      
+      if (activeTab === 'image') {
+        if (refImageSection) refImageSection.style.display = 'block';
+      } else {
+        if (refImageSection) refImageSection.style.display = 'none';
+      }
     } else if (state && state.status) {
       statusBox.textContent = state.status;
     }
@@ -63,10 +103,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Clear the other input when one is clicked to prevent conflicting logic
   startFromInput.addEventListener('input', () => {
     if (startFromInput.value) singlePromptInput.value = '';
+    saveInputs();
   });
   singlePromptInput.addEventListener('input', () => {
     if (singlePromptInput.value) startFromInput.value = '';
+    saveInputs();
   });
+  refImageNumInput.addEventListener('input', saveInputs);
 
   settingsBtn.addEventListener('click', () => {
     mainView.style.display = 'none';
@@ -146,12 +189,16 @@ document.addEventListener('DOMContentLoaded', () => {
       stopBtn.style.display = 'block';
       stopBtn.disabled = false;
 
+      const refImageVal = parseInt(document.getElementById('refImageNum').value, 10);
+      const refImageNum = isNaN(refImageVal) ? null : refImageVal;
+
       chrome.runtime.sendMessage({
         action: 'start_workflow',
         prompts: promptsToProcess,
         startIndexOffset: startIndex, // To show correct prompt # in UI
         baseUrl: 'https://www.magnific.com/app/ai-image-generator#from_element=mainmenu&from_view=pinned_tool',
-        colLetter: colLetter
+        colLetter: colLetter,
+        refImageNum: refImageNum
       });
     } catch (err) {
       statusBox.textContent = err.message;

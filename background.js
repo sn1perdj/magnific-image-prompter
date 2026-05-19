@@ -12,7 +12,8 @@ let workflowState = {
   colLetter: 'E',
   tabId: null,
   status: 'Ready',
-  retryCount: 0
+  retryCount: 0,
+  refImageNum: null
 };
 
 restoreWorkflowState();
@@ -33,7 +34,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       colLetter: message.colLetter || 'E',
       tabId: null,
       status: `Starting Column ${message.colLetter || 'E'}...`,
-      retryCount: 0
+      retryCount: 0,
+      refImageNum: message.refImageNum || null
     };
     persistWorkflowState();
 
@@ -54,6 +56,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   } else if (message.action === 'stop_workflow') {
     workflowState.active = false;
+    persistWorkflowState();
+    if (workflowState.tabId) {
+      chrome.tabs.sendMessage(workflowState.tabId, { action: 'abort_step' }, () => {
+        const err = chrome.runtime.lastError; // ignore error
+      });
+    }
     updateStatus('Workflow stopped.', true);
   } else if (message.action === 'trigger_browser_download') {
     chrome.downloads.download({
@@ -70,6 +78,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       sendResponse({ success: true, downloadId });
     });
+    return true;
+  } else if (message.action === 'keep_alive_ping') {
+    // This message just keeps the service worker from suspending
+    sendResponse({ ok: true });
     return true;
   }
 });
@@ -98,10 +110,20 @@ function processNextPrompt() {
   // Wait a bit before starting to ensure UI is ready
   setTimeout(() => {
     if (!workflowState.active) return;
-    chrome.tabs.sendMessage(workflowState.tabId, { action: 'execute_step', prompt: prompt, promptNumber: visualPromptNumber }, (response) => {
+    chrome.tabs.sendMessage(workflowState.tabId, { 
+      action: 'execute_step', 
+      prompt: prompt, 
+      promptNumber: visualPromptNumber,
+      refImageNum: workflowState.refImageNum,
+      isFirstPrompt: workflowState.currentIndex === 0
+    }, (response) => {
       if (chrome.runtime.lastError) {
         recoverFromError(`No page response: ${chrome.runtime.lastError.message || 'Unknown error'}`);
         return;
+      }
+
+      if (response && response.aborted) {
+        return; // Aborted by user, do nothing
       }
 
       if (response && response.success) {
@@ -175,10 +197,25 @@ function reloadWorkflowTab(callback) {
 function ensureWorkflowRunning() {
   if (restoreStarted || !workflowState.active || !workflowState.baseUrl) return;
   restoreStarted = true;
-  reloadWorkflowTab(() => {
-    restoreStarted = false;
-    processNextPrompt();
-  });
+  
+  if (workflowState.tabId) {
+    chrome.tabs.sendMessage(workflowState.tabId, { action: 'ping' }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        reloadWorkflowTab(() => {
+          restoreStarted = false;
+          processNextPrompt();
+        });
+      } else {
+        restoreStarted = false;
+        processNextPrompt();
+      }
+    });
+  } else {
+    reloadWorkflowTab(() => {
+      restoreStarted = false;
+      processNextPrompt();
+    });
+  }
 }
 
 function restoreWorkflowState() {

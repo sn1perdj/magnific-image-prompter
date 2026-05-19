@@ -1,16 +1,45 @@
+let currentStepAborted = false;
+let pingInterval;
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'abort_step') {
+    currentStepAborted = true;
+    sendResponse({ ok: true });
+    return;
+  }
+  if (message.action === 'ping') {
+    sendResponse({ ok: true });
+    return;
+  }
+
   if (message.action === 'execute_step') {
-    executeWorkflowStep(message.prompt, message.promptNumber)
-      .then(() => sendResponse({ success: true }))
+    currentStepAborted = false;
+    
+    // Keep service worker alive
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
+      chrome.runtime.sendMessage({ action: 'keep_alive_ping' }).catch(() => {});
+    }, 10000);
+
+    executeWorkflowStep(message.prompt, message.promptNumber, message.refImageNum, message.isFirstPrompt)
+      .then(() => {
+        clearInterval(pingInterval);
+        sendResponse({ success: true });
+      })
       .catch(err => {
-        console.error('Error executing step:', err);
-        sendResponse({ success: false, error: err.toString() });
+        clearInterval(pingInterval);
+        if (err.message === 'Aborted by user') {
+          sendResponse({ success: false, error: 'Aborted by user', aborted: true });
+        } else {
+          console.error('Error executing step:', err);
+          sendResponse({ success: false, error: err.toString() });
+        }
       });
     return true; // Keep channel open for async response
   }
 });
 
-async function executeWorkflowStep(promptText, promptNumber) {
+async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirstPrompt) {
   // 1. SELECTORS
   const promptInputSelector = 'div[contenteditable="true"].dynamic-prompt'; 
   const clearBtnSelector = 'button[data-cy="clear-prompt-button"]';
@@ -18,7 +47,26 @@ async function executeWorkflowStep(promptText, promptNumber) {
   const loadingSelector = '[data-cy="thumbnail-loading"]'; 
   const imageSelector = 'img.feed-image-loaded'; 
   
+  // 1.5. HANDLE REFERENCE IMAGE FOR FIRST PROMPT OF THIS RUN
+  if (refImageNum && isFirstPrompt) {
+    if (promptNumber === 1) {
+      await clearReferenceImage(refImageNum);
+    } else {
+      // If starting from a later prompt (e.g., G16), try to grab the last generated image from the page
+      const images = document.querySelectorAll(imageSelector);
+      if (images.length > 0) {
+        const latestImgSrc = images[0].src;
+        const dropZone = document.querySelector('div[data-cy="reference-add-button"]');
+        const targetElement = dropZone || document.querySelector(promptInputSelector);
+        await replaceReferenceImage(latestImgSrc, refImageNum, targetElement);
+      } else {
+        await clearReferenceImage(refImageNum);
+      }
+    }
+  }
+
   // 2. CLEAR PROMPT
+  if (currentStepAborted) throw new Error('Aborted by user');
   const clearBtn = document.querySelector(clearBtnSelector);
   if (clearBtn && !clearBtn.disabled) {
     clearBtn.click();
@@ -26,6 +74,7 @@ async function executeWorkflowStep(promptText, promptNumber) {
   }
 
   // 3. PASTE PROMPT
+  if (currentStepAborted) throw new Error('Aborted by user');
   const promptInput = document.querySelector(promptInputSelector);
   if (!promptInput) throw new Error('Prompt input not found');
 
@@ -37,6 +86,7 @@ async function executeWorkflowStep(promptText, promptNumber) {
   await sleep(1000); // Wait for React to update
 
   // 4. CLICK GENERATE
+  if (currentStepAborted) throw new Error('Aborted by user');
   const generateBtn = document.querySelector(generateBtnSelector);
   if (!generateBtn) throw new Error('Generate button not found');
   generateBtn.click();
@@ -49,20 +99,25 @@ async function executeWorkflowStep(promptText, promptNumber) {
   }
 
   // 5. WAIT FOR GENERATION
+  if (currentStepAborted) throw new Error('Aborted by user');
   await waitForElementToDisappear(loadingSelector, 180000); // Wait up to 3 mins
   
+  if (currentStepAborted) throw new Error('Aborted by user');
   await sleep(3000); // Wait for the image to fully render in DOM
 
   // 6. DOWNLOAD WITH CUSTOM NAME
+  if (currentStepAborted) throw new Error('Aborted by user');
   // We extract the image URL directly so we have full control over the saved filename
   const images = document.querySelectorAll(imageSelector);
+  let latestImgSrc = null;
   if (images.length > 0) {
     const latestImg = images[0];
+    latestImgSrc = latestImg.src;
     
     // Ensure filename ends in .jpg or .png (depending on the source if you want, but defaulting to .jpg works for most AI gens)
     const downloadResponse = await sendRuntimeMessage({
       action: 'trigger_browser_download',
-      url: latestImg.src,
+      url: latestImgSrc,
       filename: `${promptNumber}.jpg`
     });
 
@@ -73,10 +128,85 @@ async function executeWorkflowStep(promptText, promptNumber) {
     throw new Error('Could not find the generated image to download');
   }
 
+  // 7. REPLACE REFERENCE IMAGE IF SPECIFIED
+  if (refImageNum && latestImgSrc) {
+    const dropZone = document.querySelector('div[data-cy="reference-add-button"]');
+    const targetElement = dropZone || document.querySelector(promptInputSelector);
+    await replaceReferenceImage(latestImgSrc, refImageNum, targetElement);
+  }
+
   await sleep(1500);
 }
 
 // Helper Functions
+async function clearReferenceImage(refImageNum) {
+  const refImageAlt = `@img${refImageNum}`;
+  const refImages = document.querySelectorAll('div[data-cy="reference-image-card"] img');
+  for (let img of refImages) {
+    if (img.getAttribute('alt') && img.getAttribute('alt').includes(refImageAlt)) {
+      const card = img.closest('[data-cy="reference-image-card"]');
+      if (card) {
+        const closeBtn = card.querySelector('button'); 
+        if (closeBtn) {
+          closeBtn.click();
+          await sleep(500);
+        }
+      }
+    }
+  }
+}
+
+async function replaceReferenceImage(imageUrl, refImageNum, targetElement) {
+  // 1. Clear existing reference image with this name
+  await clearReferenceImage(refImageNum);
+
+  // 2. Fetch the newly generated image and paste it
+  try {
+    const response = await fetch(imageUrl);
+    const blob = await response.blob();
+    const file = new File([blob], `@img${refImageNum}.jpg`, { type: blob.type || 'image/jpeg' });
+    
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    
+    if (targetElement) {
+      if (targetElement.focus) targetElement.focus();
+      
+      const pasteEvent = new ClipboardEvent('paste', {
+        clipboardData: dataTransfer,
+        bubbles: true,
+        cancelable: true
+      });
+      targetElement.dispatchEvent(pasteEvent);
+      
+      const dragEnterEvent = new DragEvent('dragenter', {
+        dataTransfer: dataTransfer,
+        bubbles: true,
+        cancelable: true
+      });
+      targetElement.dispatchEvent(dragEnterEvent);
+      
+      const dragOverEvent = new DragEvent('dragover', {
+        dataTransfer: dataTransfer,
+        bubbles: true,
+        cancelable: true
+      });
+      targetElement.dispatchEvent(dragOverEvent);
+      
+      const dropEvent = new DragEvent('drop', {
+        dataTransfer: dataTransfer,
+        bubbles: true,
+        cancelable: true
+      });
+      targetElement.dispatchEvent(dropEvent);
+      
+      await sleep(2000); // Wait for upload
+    }
+  } catch (err) {
+    console.error('Failed to replace reference image:', err);
+  }
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -97,6 +227,7 @@ function sendRuntimeMessage(message) {
 async function waitForElementToAppear(selector, timeoutMs) {
   const startTime = Date.now();
   while (Date.now() - startTime < timeoutMs) {
+    if (currentStepAborted) throw new Error('Aborted by user');
     const el = document.querySelector(selector);
     if (el) {
       const style = window.getComputedStyle(el);
@@ -113,6 +244,7 @@ async function waitForElementToDisappear(selector, timeoutMs) {
   const startTime = Date.now();
   
   while (Date.now() - startTime < timeoutMs) {
+    if (currentStepAborted) throw new Error('Aborted by user');
     const el = document.querySelector(selector);
     if (!el) {
       return true; // Disappeared
