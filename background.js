@@ -83,6 +83,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // This message just keeps the service worker from suspending
     sendResponse({ ok: true });
     return true;
+  } else if (message.action === 'step_completed') {
+    if (message.aborted || !workflowState.active) {
+      return true;
+    }
+    if (message.success) {
+      workflowState.currentIndex++;
+      workflowState.retryCount = 0;
+      persistWorkflowState();
+      setTimeout(processNextPrompt, 2000);
+    } else {
+      recoverFromError(message.error || 'Unknown error');
+    }
+    return true;
   }
 });
 
@@ -121,20 +134,13 @@ function processNextPrompt() {
         recoverFromError(`No page response: ${chrome.runtime.lastError.message || 'Unknown error'}`);
         return;
       }
-
-      if (response && response.aborted) {
-        return; // Aborted by user, do nothing
+      
+      if (response && response.success === false && response.error === 'Already executing') {
+        // Just let the executing one finish and send step_completed
+        return;
       }
-
-      if (response && response.success) {
-        workflowState.currentIndex++;
-        workflowState.retryCount = 0;
-        persistWorkflowState();
-        // Short pause before the next prompt
-        setTimeout(processNextPrompt, 2000);
-      } else {
-        recoverFromError(response ? response.error : 'No response');
-      }
+      
+      // We rely on 'step_completed' message for advancing to prevent double execution.
     });
   }, 2000);
 }
@@ -146,22 +152,19 @@ function recoverFromError(errorMessage) {
   const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
 
   if (workflowState.retryCount > MAX_RECOVERY_ATTEMPTS) {
-    updateStatus(`Stopped after ${MAX_RECOVERY_ATTEMPTS} reload attempts on ${workflowState.colLetter}${visualPromptNumber}: ${errorMessage}`, true);
+    updateStatus(`Stopped after ${MAX_RECOVERY_ATTEMPTS} attempts on ${workflowState.colLetter}${visualPromptNumber}: ${errorMessage}`, true);
     return;
   }
 
-  updateStatus(`Issue on ${workflowState.colLetter}${visualPromptNumber}. Hard reloading and resuming from here... (${workflowState.retryCount}/${MAX_RECOVERY_ATTEMPTS})`);
+  updateStatus(`Issue on ${workflowState.colLetter}${visualPromptNumber}. Retrying prompt... (${workflowState.retryCount}/${MAX_RECOVERY_ATTEMPTS})`);
   persistWorkflowState();
 
-  reloadWorkflowTab(() => {
-    if (!workflowState.active) return;
-    setTimeout(processNextPrompt, RECOVERY_RELOAD_DELAY_MS);
-  });
+  setTimeout(processNextPrompt, 5000);
 }
 
 function reloadWorkflowTab(callback) {
   const reloadCurrentTab = () => {
-    chrome.tabs.reload(workflowState.tabId, { bypassCache: true }, () => {
+    chrome.tabs.reload(workflowState.tabId, undefined, () => {
       if (chrome.runtime.lastError) {
         chrome.tabs.create({ url: workflowState.baseUrl }, (tab) => {
           workflowState.tabId = tab.id;
@@ -207,7 +210,9 @@ function ensureWorkflowRunning() {
         });
       } else {
         restoreStarted = false;
-        processNextPrompt();
+        if (!response.isExecuting) {
+          processNextPrompt();
+        }
       }
     });
   } else {

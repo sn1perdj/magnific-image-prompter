@@ -1,5 +1,6 @@
 let currentStepAborted = false;
 let pingInterval;
+let isExecuting = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'abort_step') {
@@ -8,11 +9,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (message.action === 'ping') {
-    sendResponse({ ok: true });
+    sendResponse({ ok: true, isExecuting: isExecuting });
     return;
   }
 
   if (message.action === 'execute_step') {
+    if (isExecuting) {
+      sendResponse({ success: false, error: 'Already executing' });
+      return true;
+    }
+    isExecuting = true;
     currentStepAborted = false;
     
     // Keep service worker alive
@@ -23,16 +29,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     executeWorkflowStep(message.prompt, message.promptNumber, message.refImageNum, message.isFirstPrompt)
       .then(() => {
+        isExecuting = false;
         clearInterval(pingInterval);
         sendResponse({ success: true });
+        chrome.runtime.sendMessage({ action: 'step_completed', success: true });
       })
       .catch(err => {
+        isExecuting = false;
         clearInterval(pingInterval);
         if (err.message === 'Aborted by user') {
           sendResponse({ success: false, error: 'Aborted by user', aborted: true });
+          chrome.runtime.sendMessage({ action: 'step_completed', success: false, aborted: true });
         } else {
           console.error('Error executing step:', err);
           sendResponse({ success: false, error: err.toString() });
+          chrome.runtime.sendMessage({ action: 'step_completed', success: false, error: err.toString() });
         }
       });
     return true; // Keep channel open for async response
@@ -93,14 +104,14 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
 
   // Wait for the loading state to APPEAR first (so we don't accidentally skip the wait)
   try {
-    await waitForElementToAppear(loadingSelector, 10000);
+    await waitForElementToAppear(loadingSelector, 20000);
   } catch (err) {
-    console.warn('Loading state did not appear within 10 seconds, assuming it generated instantly or failed.');
+    console.warn('Loading state did not appear within 20 seconds, assuming it generated instantly or failed.');
   }
 
   // 5. WAIT FOR GENERATION
   if (currentStepAborted) throw new Error('Aborted by user');
-  await waitForElementToDisappear(loadingSelector, 180000); // Wait up to 3 mins
+  await waitForElementToDisappear(loadingSelector, 600000); // Wait up to 10 mins
   
   if (currentStepAborted) throw new Error('Aborted by user');
   await sleep(3000); // Wait for the image to fully render in DOM
@@ -143,7 +154,8 @@ async function clearReferenceImage(refImageNum) {
   const refImageAlt = `@img${refImageNum}`;
   const refImages = document.querySelectorAll('div[data-cy="reference-image-card"] img');
   for (let img of refImages) {
-    if (img.getAttribute('alt') && img.getAttribute('alt').includes(refImageAlt)) {
+    const alt = img.getAttribute('alt');
+    if (alt && (alt === refImageAlt || alt.startsWith(refImageAlt + '.'))) {
       const card = img.closest('[data-cy="reference-image-card"]');
       if (card) {
         const closeBtn = card.querySelector('button'); 
@@ -172,33 +184,37 @@ async function replaceReferenceImage(imageUrl, refImageNum, targetElement) {
     if (targetElement) {
       if (targetElement.focus) targetElement.focus();
       
-      const pasteEvent = new ClipboardEvent('paste', {
-        clipboardData: dataTransfer,
-        bubbles: true,
-        cancelable: true
-      });
-      targetElement.dispatchEvent(pasteEvent);
+      const isDropZone = targetElement.getAttribute('data-cy') === 'reference-add-button';
       
-      const dragEnterEvent = new DragEvent('dragenter', {
-        dataTransfer: dataTransfer,
-        bubbles: true,
-        cancelable: true
-      });
-      targetElement.dispatchEvent(dragEnterEvent);
-      
-      const dragOverEvent = new DragEvent('dragover', {
-        dataTransfer: dataTransfer,
-        bubbles: true,
-        cancelable: true
-      });
-      targetElement.dispatchEvent(dragOverEvent);
-      
-      const dropEvent = new DragEvent('drop', {
-        dataTransfer: dataTransfer,
-        bubbles: true,
-        cancelable: true
-      });
-      targetElement.dispatchEvent(dropEvent);
+      if (!isDropZone) {
+        const pasteEvent = new ClipboardEvent('paste', {
+          clipboardData: dataTransfer,
+          bubbles: true,
+          cancelable: true
+        });
+        targetElement.dispatchEvent(pasteEvent);
+      } else {
+        const dragEnterEvent = new DragEvent('dragenter', {
+          dataTransfer: dataTransfer,
+          bubbles: true,
+          cancelable: true
+        });
+        targetElement.dispatchEvent(dragEnterEvent);
+        
+        const dragOverEvent = new DragEvent('dragover', {
+          dataTransfer: dataTransfer,
+          bubbles: true,
+          cancelable: true
+        });
+        targetElement.dispatchEvent(dragOverEvent);
+        
+        const dropEvent = new DragEvent('drop', {
+          dataTransfer: dataTransfer,
+          bubbles: true,
+          cancelable: true
+        });
+        targetElement.dispatchEvent(dropEvent);
+      }
       
       await sleep(2000); // Wait for upload
     }
