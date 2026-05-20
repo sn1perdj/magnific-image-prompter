@@ -1,7 +1,21 @@
 const WORKFLOW_STORAGE_KEY = 'magnificWorkflowState';
 const MAX_RECOVERY_ATTEMPTS = 5;
-const RECOVERY_RELOAD_DELAY_MS = 3000;
 let restoreStarted = false;
+let expectedDownloadFilename = null;
+let expectedDownloadTimeout = null;
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (expectedDownloadFilename) {
+    suggest({ filename: expectedDownloadFilename });
+    expectedDownloadFilename = null;
+    if (expectedDownloadTimeout) {
+      clearTimeout(expectedDownloadTimeout);
+      expectedDownloadTimeout = null;
+    }
+  } else {
+    suggest();
+  }
+});
 
 let workflowState = {
   active: false,
@@ -63,21 +77,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     updateStatus('Workflow stopped.', true);
-  } else if (message.action === 'trigger_browser_download') {
-    chrome.downloads.download({
-      url: message.url,
-      filename: message.filename
-    }, (downloadId) => {
-      if (chrome.runtime.lastError || !downloadId) {
-        sendResponse({
-          success: false,
-          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Download did not start'
-        });
-        return;
-      }
-
-      sendResponse({ success: true, downloadId });
-    });
+  } else if (message.action === 'prepare_download') {
+    expectedDownloadFilename = message.filename;
+    if (expectedDownloadTimeout) clearTimeout(expectedDownloadTimeout);
+    expectedDownloadTimeout = setTimeout(() => {
+      expectedDownloadFilename = null;
+    }, 15000);
+    sendResponse({ success: true });
     return true;
   } else if (message.action === 'keep_alive_ping') {
     // This message just keeps the service worker from suspending
@@ -131,7 +137,12 @@ function processNextPrompt() {
       isFirstPrompt: workflowState.currentIndex === 0
     }, (response) => {
       if (chrome.runtime.lastError) {
-        recoverFromError(`No page response: ${chrome.runtime.lastError.message || 'Unknown error'}`);
+        const msg = chrome.runtime.lastError.message;
+        // The port can close during long 10-minute generations.
+        // We only want to recover if the tab is completely dead.
+        if (msg && msg.includes('Receiving end does not exist')) {
+          recoverFromError(`Tab dead: ${msg}`);
+        }
         return;
       }
       
@@ -148,18 +159,10 @@ function processNextPrompt() {
 function recoverFromError(errorMessage) {
   if (!workflowState.active) return;
 
-  workflowState.retryCount = (workflowState.retryCount || 0) + 1;
   const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
-
-  if (workflowState.retryCount > MAX_RECOVERY_ATTEMPTS) {
-    updateStatus(`Stopped after ${MAX_RECOVERY_ATTEMPTS} attempts on ${workflowState.colLetter}${visualPromptNumber}: ${errorMessage}`, true);
-    return;
-  }
-
-  updateStatus(`Issue on ${workflowState.colLetter}${visualPromptNumber}. Retrying prompt... (${workflowState.retryCount}/${MAX_RECOVERY_ATTEMPTS})`);
+  updateStatus(`Error on ${workflowState.colLetter}${visualPromptNumber}: ${errorMessage}. Workflow halted.`, true);
+  workflowState.active = false;
   persistWorkflowState();
-
-  setTimeout(processNextPrompt, 5000);
 }
 
 function reloadWorkflowTab(callback) {

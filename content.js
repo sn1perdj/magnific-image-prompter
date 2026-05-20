@@ -57,6 +57,12 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
   const generateBtnSelector = 'button[data-cy="generate-button"]'; 
   const loadingSelector = '[data-cy="thumbnail-loading"]'; 
   const imageSelector = 'img.feed-image-loaded'; 
+
+  // Close any open viewer just in case it got stuck
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+  const initialCloseBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
+  if (initialCloseBtn) initialCloseBtn.click();
+  await sleep(500);
   
   // 1.5. HANDLE REFERENCE IMAGE FOR FIRST PROMPT OF THIS RUN
   if (refImageNum && isFirstPrompt) {
@@ -96,47 +102,102 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
 
   await sleep(1000); // Wait for React to update
 
+  // RECORD CURRENT FIRST ITEM TO DETECT NEW GENERATION
+  const feedItemSelector = 'div[data-cy="main-feed-item"]';
+  const previousFirstItem = document.querySelector(feedItemSelector);
+  const previousItemId = previousFirstItem ? previousFirstItem.getAttribute('data-item') : null;
+
   // 4. CLICK GENERATE
   if (currentStepAborted) throw new Error('Aborted by user');
   const generateBtn = document.querySelector(generateBtnSelector);
   if (!generateBtn) throw new Error('Generate button not found');
   generateBtn.click();
 
-  // Wait for the loading state to APPEAR first (so we don't accidentally skip the wait)
-  try {
-    await waitForElementToAppear(loadingSelector, 20000);
-  } catch (err) {
-    console.warn('Loading state did not appear within 20 seconds, assuming it generated instantly or failed.');
+  // 5 & 6. WAIT FOR NEW COMPLETED ITEM TO APPEAR AT TOP OF FEED
+  let thumbnailImg = null;
+  let latestImgSrc = null;
+  let newFeedElement = null;
+
+  for (let i = 0; i < 3600; i++) {
+    if (currentStepAborted) throw new Error('Aborted by user');
+    
+    const currentFirstItem = document.querySelector(feedItemSelector);
+    if (currentFirstItem) {
+      const currentId = currentFirstItem.getAttribute('data-item');
+      
+      // If the top item has changed from what we started with, it's the new generation
+      if (currentId && currentId !== previousItemId) {
+        const img = currentFirstItem.querySelector('img.feed-image-loaded, img.feed-image-reveal');
+        
+        let isActuallyLoading = false;
+        const loadingEl = currentFirstItem.querySelector(loadingSelector);
+        if (loadingEl) {
+          const style = window.getComputedStyle(loadingEl);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+            isActuallyLoading = true;
+          }
+        }
+        
+        if (img && !isActuallyLoading) {
+          thumbnailImg = img;
+          latestImgSrc = img.src;
+          newFeedElement = currentFirstItem;
+          break;
+        }
+      }
+    }
+    await sleep(1000);
   }
 
-  // 5. WAIT FOR GENERATION
-  if (currentStepAborted) throw new Error('Aborted by user');
-  await waitForElementToDisappear(loadingSelector, 600000); // Wait up to 10 mins
-  
-  if (currentStepAborted) throw new Error('Aborted by user');
-  await sleep(3000); // Wait for the image to fully render in DOM
+  if (!thumbnailImg || !newFeedElement) {
+    throw new Error('Timeout waiting for the generated image to finish and appear');
+  }
 
-  // 6. DOWNLOAD WITH CUSTOM NAME
-  if (currentStepAborted) throw new Error('Aborted by user');
-  // We extract the image URL directly so we have full control over the saved filename
-  const images = document.querySelectorAll(imageSelector);
-  let latestImgSrc = null;
-  if (images.length > 0) {
-    const latestImg = images[0];
-    latestImgSrc = latestImg.src;
-    
-    // Ensure filename ends in .jpg or .png (depending on the source if you want, but defaulting to .jpg works for most AI gens)
-    const downloadResponse = await sendRuntimeMessage({
-      action: 'trigger_browser_download',
-      url: latestImgSrc,
-      filename: `${promptNumber}.jpg`
+  // Click the thumbnail container to open the full viewer
+  // Simulate mousedown/mouseup in case React intercepts it
+  const simulateClick = (element) => {
+    const mouseEventInit = { bubbles: true, cancelable: true, view: window };
+    element.dispatchEvent(new MouseEvent('mousedown', mouseEventInit));
+    element.dispatchEvent(new MouseEvent('mouseup', mouseEventInit));
+    element.click();
+  };
+  
+  const clickableContainer = newFeedElement.querySelector('[data-cy="image-creation-feed-item"]') || newFeedElement;
+  simulateClick(clickableContainer);
+  await sleep(2500); // Wait slightly longer for viewer animation
+
+  // 7. DOWNLOAD FROM FULL VIEWER
+  let exportBtn = null;
+  for (let i = 0; i < 15; i++) {
+    if (currentStepAborted) throw new Error('Aborted by user');
+    exportBtn = document.querySelector('button[data-cy="download-button-export"], #export-button');
+    if (exportBtn) break;
+    await sleep(500);
+  }
+
+  if (exportBtn) {
+    // Tell background script to intercept and rename the high-res file that Magnific will download
+    const prepareResponse = await sendRuntimeMessage({
+      action: 'prepare_download',
+      filename: `${promptNumber}.png`
     });
 
-    if (!downloadResponse || !downloadResponse.success) {
-      throw new Error(downloadResponse && downloadResponse.error ? downloadResponse.error : 'Download failed to start');
+    if (!prepareResponse || !prepareResponse.success) {
+      throw new Error('Failed to prepare download interception');
     }
+    
+    // Click Magnific's native download button in the full viewer
+    exportBtn.click();
+    await sleep(1500); // wait for download to trigger
+    
+    // Close the viewer (Escape key usually works)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+    const closeBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
+    if (closeBtn) closeBtn.click();
+    
+    await sleep(1000);
   } else {
-    throw new Error('Could not find the generated image to download');
+    throw new Error('Could not find the export button in the full viewer');
   }
 
   // 7. REPLACE REFERENCE IMAGE IF SPECIFIED
