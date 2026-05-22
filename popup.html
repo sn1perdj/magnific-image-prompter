@@ -44,11 +44,22 @@
         </div>
       </div>
 
-      <div class="section" id="refImageSection" style="display: none;">
-        <label for="refImageNum">Reference Image # <span class="optional-badge">Optional</span></label>
+      <div class="section" id="locationRefSection" style="display: none;">
+        <label for="locationRefNum">Location Reference Tag # <span class="optional-badge">Optional</span></label>
         <div class="input-wrapper">
-          <input type="number" id="refImageNum" placeholder="e.g. 8" class="input-field">
+          <input type="number" id="locationRefNum" placeholder="e.g. 14" class="input-field">
         </div>
+        <p class="help-text">If the prompt includes <code>@img14</code>, the last generated image will be added as a reference.</p>
+      </div>
+
+      <div class="section" id="imageManagerSection" style="display: none;">
+        <div class="section-header">
+          <label>Tagged Reference Images</label>
+          <button id="addImageBtn" class="add-image-btn" type="button" title="Add image">+</button>
+        </div>
+        <input type="file" id="imageUploadInput" accept="image/*" multiple hidden>
+        <div id="imageTagList" class="image-tag-list"></div>
+        <p class="help-text">Upload multiple refs, rename their tags if needed, and mention those tags in the prompt to attach only the matching images.</p>
       </div>
     </div>
 

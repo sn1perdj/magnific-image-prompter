@@ -27,7 +27,8 @@ let workflowState = {
   tabId: null,
   status: 'Ready',
   retryCount: 0,
-  refImageNum: null
+  locationRefNum: null,
+  uploadedReferenceImages: []
 };
 
 restoreWorkflowState();
@@ -49,7 +50,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: null,
       status: `Starting Column ${message.colLetter || 'E'}...`,
       retryCount: 0,
-      refImageNum: message.refImageNum || null
+      locationRefNum: message.locationRefNum || null,
+      uploadedReferenceImages: Array.isArray(message.uploadedReferenceImages) ? message.uploadedReferenceImages : []
     };
     persistWorkflowState();
 
@@ -133,8 +135,8 @@ function processNextPrompt() {
       action: 'execute_step', 
       prompt: prompt, 
       promptNumber: visualPromptNumber,
-      refImageNum: workflowState.refImageNum,
-      isFirstPrompt: workflowState.currentIndex === 0
+      locationRefNum: workflowState.locationRefNum,
+      uploadedReferenceImages: workflowState.uploadedReferenceImages
     }, (response) => {
       if (chrome.runtime.lastError) {
         const msg = chrome.runtime.lastError.message;

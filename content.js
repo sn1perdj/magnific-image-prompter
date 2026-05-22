@@ -8,8 +8,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+
   if (message.action === 'ping') {
-    sendResponse({ ok: true, isExecuting: isExecuting });
+    sendResponse({ ok: true, isExecuting });
     return;
   }
 
@@ -18,25 +19,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: 'Already executing' });
       return true;
     }
+
     isExecuting = true;
     currentStepAborted = false;
-    
-    // Keep service worker alive
+
     if (pingInterval) clearInterval(pingInterval);
     pingInterval = setInterval(() => {
       chrome.runtime.sendMessage({ action: 'keep_alive_ping' }).catch(() => {});
     }, 10000);
 
-    executeWorkflowStep(message.prompt, message.promptNumber, message.refImageNum, message.isFirstPrompt)
+    executeWorkflowStep(
+      message.prompt,
+      message.promptNumber,
+      Array.isArray(message.uploadedReferenceImages) ? message.uploadedReferenceImages : [],
+      message.locationRefNum || null
+    )
       .then(() => {
         isExecuting = false;
         clearInterval(pingInterval);
         sendResponse({ success: true });
         chrome.runtime.sendMessage({ action: 'step_completed', success: true });
       })
-      .catch(err => {
+      .catch((err) => {
         isExecuting = false;
         clearInterval(pingInterval);
+
         if (err.message === 'Aborted by user') {
           sendResponse({ success: false, error: 'Aborted by user', aborted: true });
           chrome.runtime.sendMessage({ action: 'step_completed', success: false, aborted: true });
@@ -46,43 +53,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           chrome.runtime.sendMessage({ action: 'step_completed', success: false, error: err.toString() });
         }
       });
-    return true; // Keep channel open for async response
+
+    return true;
   }
 });
 
-async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirstPrompt) {
-  // 1. SELECTORS
-  const promptInputSelector = 'div[contenteditable="true"].dynamic-prompt'; 
+async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceImages, locationRefNum) {
+  const promptInputSelector = 'div[contenteditable="true"].dynamic-prompt';
   const clearBtnSelector = 'button[data-cy="clear-prompt-button"]';
-  const generateBtnSelector = 'button[data-cy="generate-button"]'; 
-  const loadingSelector = '[data-cy="thumbnail-loading"]'; 
-  const imageSelector = 'img.feed-image-loaded'; 
+  const generateBtnSelector = 'button[data-cy="generate-button"]';
+  const loadingSelector = '[data-cy="thumbnail-loading"]';
+  const imageSelector = 'img.feed-image-loaded';
+  const feedItemSelector = 'div[data-cy="main-feed-item"]';
 
-  // Close any open viewer just in case it got stuck
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
   const initialCloseBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
   if (initialCloseBtn) initialCloseBtn.click();
   await sleep(500);
-  
-  // 1.5. HANDLE REFERENCE IMAGE FOR FIRST PROMPT OF THIS RUN
-  if (refImageNum && isFirstPrompt) {
-    if (promptNumber === 1) {
-      await clearReferenceImage(refImageNum);
-    } else {
-      // If starting from a later prompt (e.g., G16), try to grab the last generated image from the page
-      const images = document.querySelectorAll(imageSelector);
-      if (images.length > 0) {
-        const latestImgSrc = images[0].src;
-        const dropZone = document.querySelector('div[data-cy="reference-add-button"]');
-        const targetElement = dropZone || document.querySelector(promptInputSelector);
-        await replaceReferenceImage(latestImgSrc, refImageNum, targetElement);
-      } else {
-        await clearReferenceImage(refImageNum);
-      }
-    }
-  }
 
-  // 2. CLEAR PROMPT
+  const promptTags = extractPromptTags(promptText);
+  const assignedPromptTags = await syncReferenceImagesForPrompt(
+    promptTags,
+    uploadedReferenceImages,
+    locationRefNum,
+    promptNumber,
+    promptInputSelector
+  );
+  const finalPromptText = remapPromptTags(promptText, assignedPromptTags);
+
   if (currentStepAborted) throw new Error('Aborted by user');
   const clearBtn = document.querySelector(clearBtnSelector);
   if (clearBtn && !clearBtn.disabled) {
@@ -90,7 +88,6 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
     await sleep(500);
   }
 
-  // 3. PASTE PROMPT
   if (currentStepAborted) throw new Error('Aborted by user');
   const promptInput = document.querySelector(promptInputSelector);
   if (!promptInput) throw new Error('Prompt input not found');
@@ -98,37 +95,30 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
   promptInput.focus();
   document.execCommand('selectAll', false, null);
   document.execCommand('delete', false, null);
-  document.execCommand('insertText', false, promptText);
+  document.execCommand('insertText', false, finalPromptText);
 
-  await sleep(1000); // Wait for React to update
+  await sleep(1000);
 
-  // RECORD CURRENT FIRST ITEM TO DETECT NEW GENERATION
-  const feedItemSelector = 'div[data-cy="main-feed-item"]';
   const previousFirstItem = document.querySelector(feedItemSelector);
   const previousItemId = previousFirstItem ? previousFirstItem.getAttribute('data-item') : null;
 
-  // 4. CLICK GENERATE
   if (currentStepAborted) throw new Error('Aborted by user');
   const generateBtn = document.querySelector(generateBtnSelector);
   if (!generateBtn) throw new Error('Generate button not found');
   generateBtn.click();
 
-  // 5 & 6. WAIT FOR NEW COMPLETED ITEM TO APPEAR AT TOP OF FEED
   let thumbnailImg = null;
-  let latestImgSrc = null;
   let newFeedElement = null;
 
-  for (let i = 0; i < 3600; i++) {
+  for (let i = 0; i < 3600; i += 1) {
     if (currentStepAborted) throw new Error('Aborted by user');
-    
+
     const currentFirstItem = document.querySelector(feedItemSelector);
     if (currentFirstItem) {
       const currentId = currentFirstItem.getAttribute('data-item');
-      
-      // If the top item has changed from what we started with, it's the new generation
       if (currentId && currentId !== previousItemId) {
         const img = currentFirstItem.querySelector('img.feed-image-loaded, img.feed-image-reveal');
-        
+
         let isActuallyLoading = false;
         const loadingEl = currentFirstItem.querySelector(loadingSelector);
         if (loadingEl) {
@@ -137,15 +127,15 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
             isActuallyLoading = true;
           }
         }
-        
+
         if (img && !isActuallyLoading) {
           thumbnailImg = img;
-          latestImgSrc = img.src;
           newFeedElement = currentFirstItem;
           break;
         }
       }
     }
+
     await sleep(1000);
   }
 
@@ -153,139 +143,283 @@ async function executeWorkflowStep(promptText, promptNumber, refImageNum, isFirs
     throw new Error('Timeout waiting for the generated image to finish and appear');
   }
 
-  // Click the thumbnail container to open the full viewer
-  // Simulate mousedown/mouseup in case React intercepts it
   const simulateClick = (element) => {
     const mouseEventInit = { bubbles: true, cancelable: true, view: window };
     element.dispatchEvent(new MouseEvent('mousedown', mouseEventInit));
     element.dispatchEvent(new MouseEvent('mouseup', mouseEventInit));
     element.click();
   };
-  
+
   const clickableContainer = newFeedElement.querySelector('[data-cy="image-creation-feed-item"]') || newFeedElement;
   simulateClick(clickableContainer);
-  await sleep(2500); // Wait slightly longer for viewer animation
+  await sleep(2500);
 
-  // 7. DOWNLOAD FROM FULL VIEWER
   let exportBtn = null;
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 15; i += 1) {
     if (currentStepAborted) throw new Error('Aborted by user');
     exportBtn = document.querySelector('button[data-cy="download-button-export"], #export-button');
     if (exportBtn) break;
     await sleep(500);
   }
 
-  if (exportBtn) {
-    // Tell background script to intercept and rename the high-res file that Magnific will download
-    const prepareResponse = await sendRuntimeMessage({
-      action: 'prepare_download',
-      filename: `${promptNumber}.png`
-    });
-
-    if (!prepareResponse || !prepareResponse.success) {
-      throw new Error('Failed to prepare download interception');
-    }
-    
-    // Click Magnific's native download button in the full viewer
-    exportBtn.click();
-    await sleep(1500); // wait for download to trigger
-    
-    // Close the viewer (Escape key usually works)
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-    const closeBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
-    if (closeBtn) closeBtn.click();
-    
-    await sleep(1000);
-  } else {
+  if (!exportBtn) {
     throw new Error('Could not find the export button in the full viewer');
   }
 
-  // 7. REPLACE REFERENCE IMAGE IF SPECIFIED
-  if (refImageNum && latestImgSrc) {
-    const dropZone = document.querySelector('div[data-cy="reference-add-button"]');
-    const targetElement = dropZone || document.querySelector(promptInputSelector);
-    await replaceReferenceImage(latestImgSrc, refImageNum, targetElement);
+  const prepareResponse = await sendRuntimeMessage({
+    action: 'prepare_download',
+    filename: `${promptNumber}.png`
+  });
+
+  if (!prepareResponse || !prepareResponse.success) {
+    throw new Error('Failed to prepare download interception');
   }
 
+  exportBtn.click();
   await sleep(1500);
+
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+  const closeBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
+  if (closeBtn) closeBtn.click();
+
+  await sleep(2500);
 }
 
-// Helper Functions
-async function clearReferenceImage(refImageNum) {
-  const refImageAlt = `@img${refImageNum}`;
-  const refImages = document.querySelectorAll('div[data-cy="reference-image-card"] img');
-  for (let img of refImages) {
-    const alt = img.getAttribute('alt');
-    if (alt && (alt === refImageAlt || alt.startsWith(refImageAlt + '.'))) {
-      const card = img.closest('[data-cy="reference-image-card"]');
-      if (card) {
-        const closeBtn = card.querySelector('button'); 
-        if (closeBtn) {
-          closeBtn.click();
-          await sleep(500);
+function extractPromptTags(promptText) {
+  const matches = promptText.match(/@[a-z0-9_-]+/gi) || [];
+  const orderedTags = [];
+  const seen = new Set();
+
+  for (const match of matches) {
+    const normalizedTag = normalizeTag(match);
+    if (!seen.has(normalizedTag)) {
+      seen.add(normalizedTag);
+      orderedTags.push(normalizedTag);
+    }
+  }
+
+  return orderedTags;
+}
+
+function normalizeTag(tag) {
+  return String(tag || '').trim().toLowerCase();
+}
+
+function remapPromptTags(promptText, assignedPromptTags) {
+  if (!assignedPromptTags || assignedPromptTags.size === 0) {
+    return promptText;
+  }
+
+  return promptText.replace(/@[a-z0-9_-]+/gi, (match) => {
+    const normalizedTag = normalizeTag(match);
+    return assignedPromptTags.get(normalizedTag) || match;
+  });
+}
+
+async function syncReferenceImagesForPrompt(promptTags, uploadedReferenceImages, locationRefNum, promptNumber, promptInputSelector) {
+  await clearAllReferenceImages();
+
+  const assignedPromptTags = new Map();
+
+  if (!promptTags.length) {
+    return assignedPromptTags;
+  }
+
+  const uploadedReferenceMap = new Map();
+  for (const image of uploadedReferenceImages) {
+    if (!image || !image.tag || !image.dataUrl) continue;
+    uploadedReferenceMap.set(normalizeTag(image.tag), image);
+  }
+
+  const locationRefTag = locationRefNum ? normalizeTag(`@img${locationRefNum}`) : null;
+
+  for (const promptTag of promptTags) {
+    if (currentStepAborted) throw new Error('Aborted by user');
+
+    if (locationRefTag && promptTag === locationRefTag) {
+      if (promptNumber > 1) {
+        const latestGeneratedImageSrc = getLatestGeneratedImageSrc();
+        if (latestGeneratedImageSrc) {
+          const assignedTag = await addReferenceImageFromUrl(
+            latestGeneratedImageSrc,
+            `${promptTag}.jpg`,
+            promptInputSelector
+          );
+          if (assignedTag) {
+            assignedPromptTags.set(promptTag, assignedTag);
+          }
         }
+      }
+      continue;
+    }
+
+    const matchedReference = uploadedReferenceMap.get(promptTag);
+    if (matchedReference) {
+      const assignedTag = await addReferenceImageFromUrl(
+        matchedReference.dataUrl,
+        `${promptTag}.png`,
+        promptInputSelector
+      );
+      if (assignedTag) {
+        assignedPromptTags.set(promptTag, assignedTag);
       }
     }
   }
+
+  return assignedPromptTags;
 }
 
-async function replaceReferenceImage(imageUrl, refImageNum, targetElement) {
-  // 1. Clear existing reference image with this name
-  await clearReferenceImage(refImageNum);
+function getLatestGeneratedImageSrc() {
+  const images = document.querySelectorAll('img.feed-image-loaded, img.feed-image-reveal');
+  if (!images.length) {
+    return null;
+  }
 
-  // 2. Fetch the newly generated image and paste it
+  return images[0].src || null;
+}
+
+async function clearAllReferenceImages() {
+  for (let pass = 0; pass < 10; pass += 1) {
+    const cards = Array.from(document.querySelectorAll('[data-cy="reference-image-card"]'));
+    if (cards.length === 0) {
+      return;
+    }
+
+    let removedAny = false;
+    for (const card of cards) {
+      const closeBtn = card.querySelector('button');
+      if (closeBtn) {
+        closeBtn.click();
+        removedAny = true;
+        await sleep(300);
+      }
+    }
+
+    if (!removedAny) {
+      return;
+    }
+
+    await sleep(500);
+  }
+}
+
+function getReferenceTarget(promptInputSelector) {
+  return document.querySelector('div[data-cy="reference-add-button"]') || document.querySelector(promptInputSelector);
+}
+
+async function addReferenceImageFromUrl(imageUrl, fileName, promptInputSelector) {
   try {
     const response = await fetch(imageUrl);
     const blob = await response.blob();
-    const file = new File([blob], `@img${refImageNum}.jpg`, { type: blob.type || 'image/jpeg' });
-    
-    const dataTransfer = new DataTransfer();
-    dataTransfer.items.add(file);
-    
-    if (targetElement) {
-      if (targetElement.focus) targetElement.focus();
-      
-      const isDropZone = targetElement.getAttribute('data-cy') === 'reference-add-button';
-      
-      if (!isDropZone) {
-        const pasteEvent = new ClipboardEvent('paste', {
-          clipboardData: dataTransfer,
-          bubbles: true,
-          cancelable: true
-        });
-        targetElement.dispatchEvent(pasteEvent);
-      } else {
-        const dragEnterEvent = new DragEvent('dragenter', {
-          dataTransfer: dataTransfer,
-          bubbles: true,
-          cancelable: true
-        });
-        targetElement.dispatchEvent(dragEnterEvent);
-        
-        const dragOverEvent = new DragEvent('dragover', {
-          dataTransfer: dataTransfer,
-          bubbles: true,
-          cancelable: true
-        });
-        targetElement.dispatchEvent(dragOverEvent);
-        
-        const dropEvent = new DragEvent('drop', {
-          dataTransfer: dataTransfer,
-          bubbles: true,
-          cancelable: true
-        });
-        targetElement.dispatchEvent(dropEvent);
-      }
-      
-      await sleep(2000); // Wait for upload
-    }
+    return await addReferenceImageFromBlob(blob, fileName, promptInputSelector);
   } catch (err) {
-    console.error('Failed to replace reference image:', err);
+    console.error('Failed to add reference image:', err);
+    return null;
   }
 }
 
+async function addReferenceImageFromBlob(blob, fileName, promptInputSelector) {
+  const targetElement = getReferenceTarget(promptInputSelector);
+  if (!targetElement) {
+    throw new Error('Reference target not found');
+  }
+
+  const existingCards = Array.from(document.querySelectorAll('[data-cy="reference-image-card"]'));
+  const existingCardCount = existingCards.length;
+
+  const file = new File([blob], fileName, { type: blob.type || 'image/png' });
+  const dataTransfer = new DataTransfer();
+  dataTransfer.items.add(file);
+
+  if (targetElement.focus) targetElement.focus();
+
+  const isDropZone = targetElement.getAttribute('data-cy') === 'reference-add-button';
+  if (!isDropZone) {
+    const pasteEvent = new ClipboardEvent('paste', {
+      clipboardData: dataTransfer,
+      bubbles: true,
+      cancelable: true
+    });
+    targetElement.dispatchEvent(pasteEvent);
+  } else {
+    const dragEnterEvent = new DragEvent('dragenter', {
+      dataTransfer,
+      bubbles: true,
+      cancelable: true
+    });
+    targetElement.dispatchEvent(dragEnterEvent);
+
+    const dragOverEvent = new DragEvent('dragover', {
+      dataTransfer,
+      bubbles: true,
+      cancelable: true
+    });
+    targetElement.dispatchEvent(dragOverEvent);
+
+    const dropEvent = new DragEvent('drop', {
+      dataTransfer,
+      bubbles: true,
+      cancelable: true
+    });
+    targetElement.dispatchEvent(dropEvent);
+  }
+
+  await sleep(2000);
+
+  return await waitForAssignedReferenceTag(existingCardCount);
+}
+
+async function waitForAssignedReferenceTag(previousCardCount) {
+  for (let i = 0; i < 20; i += 1) {
+    const cards = Array.from(document.querySelectorAll('[data-cy="reference-image-card"]'));
+    if (cards.length > previousCardCount) {
+      const newCard = cards[cards.length - 1];
+      const extractedTag = extractReferenceTagFromCard(newCard);
+      if (extractedTag) {
+        return extractedTag;
+      }
+
+      return `@img${cards.length}`;
+    }
+
+    await sleep(300);
+  }
+
+  const cards = Array.from(document.querySelectorAll('[data-cy="reference-image-card"]'));
+  if (cards.length > previousCardCount) {
+    const newCard = cards[cards.length - 1];
+    return extractReferenceTagFromCard(newCard) || `@img${cards.length}`;
+  }
+
+  return null;
+}
+
+function extractReferenceTagFromCard(card) {
+  if (!card) {
+    return null;
+  }
+
+  const ariaLabelMatch = normalizeTag(card.getAttribute('aria-label')).match(/@img\d+/i);
+  if (ariaLabelMatch) {
+    return normalizeTag(ariaLabelMatch[0]);
+  }
+
+  const textMatch = normalizeTag(card.textContent).match(/@img\d+/i);
+  if (textMatch) {
+    return normalizeTag(textMatch[0]);
+  }
+
+  const datasetValues = Object.values(card.dataset || {}).join(' ');
+  const datasetMatch = normalizeTag(datasetValues).match(/@img\d+/i);
+  if (datasetMatch) {
+    return normalizeTag(datasetMatch[0]);
+  }
+
+  return null;
+}
+
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sendRuntimeMessage(message) {
@@ -299,39 +433,4 @@ function sendRuntimeMessage(message) {
       resolve(response);
     });
   });
-}
-
-async function waitForElementToAppear(selector, timeoutMs) {
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeoutMs) {
-    if (currentStepAborted) throw new Error('Aborted by user');
-    const el = document.querySelector(selector);
-    if (el) {
-      const style = window.getComputedStyle(el);
-      if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-        return true;
-      }
-    }
-    await sleep(500); // Check every 500ms
-  }
-  throw new Error(`Timeout waiting for ${selector} to appear`);
-}
-
-async function waitForElementToDisappear(selector, timeoutMs) {
-  const startTime = Date.now();
-  
-  while (Date.now() - startTime < timeoutMs) {
-    if (currentStepAborted) throw new Error('Aborted by user');
-    const el = document.querySelector(selector);
-    if (!el) {
-      return true; // Disappeared
-    }
-    // Check if it's visible or hidden by CSS
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-      return true;
-    }
-    await sleep(2000); // Check every 2 seconds
-  }
-  throw new Error(`Timeout waiting for ${selector} to disappear`);
 }
