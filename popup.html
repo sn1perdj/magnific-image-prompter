@@ -52,14 +52,67 @@
         <p class="help-text">If the prompt includes <code>@img14</code>, the last generated image will be added as a reference.</p>
       </div>
 
-      <div class="section" id="imageManagerSection" style="display: none;">
+      <div class="section" id="locationManagerSection" style="display: none;">
         <div class="section-header">
-          <label>Tagged Reference Images</label>
-          <button id="addImageBtn" class="add-image-btn" type="button" title="Add image">+</button>
+          <label>Auto-Captured Locations</label>
+          <button id="clearLocationsBtn" class="btn secondary" style="padding: 2px 6px; font-size: 10px; height: 24px;">Clear All</button>
         </div>
-        <input type="file" id="imageUploadInput" accept="image/*" multiple hidden>
-        <div id="imageTagList" class="image-tag-list"></div>
-        <p class="help-text">Upload multiple refs, rename their tags if needed, and mention those tags in the prompt to attach only the matching images.</p>
+        <div id="locationTagList" class="image-tag-list"></div>
+        <p class="help-text">Location reference images will appear here automatically when they are first generated.</p>
+      </div>
+
+      <div class="section" id="characterManagerSection" style="display: flex;">
+        <div class="section-header">
+          <label>Auto-Captured Characters</label>
+          <button id="clearCharactersBtn" class="btn secondary" style="padding: 2px 6px; font-size: 10px; height: 24px;">Clear All</button>
+        </div>
+        <div id="characterTagList" class="image-tag-list"></div>
+        <p class="help-text">Character reference images will appear here automatically when they are first generated.</p>
+      </div>
+
+      <div class="section" id="imageManagerSection" style="display: none;">
+        <div class="tabs sub-tabs" style="margin-bottom: 10px;">
+          <button class="tab sub-tab active" data-subtab="image-character">Character</button>
+          <button class="tab sub-tab" data-subtab="image-location">Location</button>
+        </div>
+
+        <div id="imageCharacterSection" style="display: flex; flex-direction: column; gap: 8px;">
+          <div class="section-header" style="margin-bottom: 4px;">
+            <label>Character Images</label>
+            <button id="addCharacterImagesBtn" class="icon-btn-small" type="button" title="Add character images">
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            </button>
+          </div>
+          <p class="help-text" style="margin-top: -4px;">Upload sequential images (1.png) and click Import to rename from Sheet (Col E).</p>
+          <div class="action-bar">
+            <button id="importCharacterSheetBtn" class="btn secondary btn-sm">Import Names</button>
+            <button id="clearImportCharactersBtn" class="btn secondary btn-sm">Clear All</button>
+          </div>
+          <input type="file" id="characterUploadInput" accept="image/*" multiple hidden>
+          <details class="custom-details">
+            <summary>View Uploaded Images</summary>
+            <div id="characterImportTagList" class="image-tag-list"></div>
+          </details>
+        </div>
+
+        <div id="imageLocationSection" style="display: none; flex-direction: column; gap: 8px;">
+          <div class="section-header" style="margin-bottom: 4px;">
+            <label>Location Images</label>
+            <button id="addLocationImagesBtn" class="icon-btn-small" type="button" title="Add location images">
+               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            </button>
+          </div>
+          <p class="help-text" style="margin-top: -4px;">Upload sequential images (1.png) and click Import to rename from Sheet (Col F).</p>
+          <div class="action-bar">
+            <button id="importLocationSheetBtn" class="btn secondary btn-sm">Import Names</button>
+            <button id="clearImportLocationsBtn" class="btn secondary btn-sm">Clear All</button>
+          </div>
+          <input type="file" id="locationUploadInput" accept="image/*" multiple hidden>
+          <details class="custom-details">
+            <summary>View Uploaded Images</summary>
+            <div id="locationImportTagList" class="image-tag-list"></div>
+          </details>
+        </div>
       </div>
     </div>
 

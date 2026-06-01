@@ -70,6 +70,7 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   const initialCloseBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
   if (initialCloseBtn) initialCloseBtn.click();
   await sleep(500);
+  await reportProgress('syncing references');
 
   const promptTags = extractPromptTags(promptText);
   const assignedPromptTags = await syncReferenceImagesForPrompt(
@@ -79,7 +80,14 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
     promptNumber,
     promptInputSelector
   );
-  const finalPromptText = remapPromptTags(promptText, assignedPromptTags);
+  let finalPromptText = remapPromptTags(promptText, assignedPromptTags);
+
+  try {
+    finalPromptText = await enrichPromptWithNamedReferences(finalPromptText, uploadedReferenceImages, promptInputSelector);
+  } catch (error) {
+    console.warn('Skipping named reference enrichment for this prompt:', error);
+  }
+
 
   if (currentStepAborted) throw new Error('Aborted by user');
   const clearBtn = document.querySelector(clearBtnSelector);
@@ -92,19 +100,28 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   const promptInput = document.querySelector(promptInputSelector);
   if (!promptInput) throw new Error('Prompt input not found');
 
-  promptInput.focus();
-  document.execCommand('selectAll', false, null);
-  document.execCommand('delete', false, null);
-  document.execCommand('insertText', false, finalPromptText);
+  await reportProgress('writing prompt');
+  await setPromptEditorText(promptInput, finalPromptText);
 
   await sleep(1000);
+
+  const promptTextAfterInsert = getPromptEditorText(promptInput);
+  if (!promptTextAfterInsert || promptTextAfterInsert.length < Math.min(10, finalPromptText.length)) {
+    throw new Error('Prompt text was not inserted into Magnific');
+  }
 
   const previousFirstItem = document.querySelector(feedItemSelector);
   const previousItemId = previousFirstItem ? previousFirstItem.getAttribute('data-item') : null;
 
   if (currentStepAborted) throw new Error('Aborted by user');
-  const generateBtn = document.querySelector(generateBtnSelector);
+  await reportProgress('waiting for generate button');
+  const generateBtn = await waitForEnabledElement(generateBtnSelector, 15000, 250);
   if (!generateBtn) throw new Error('Generate button not found');
+  if (isElementDisabled(generateBtn)) {
+    throw new Error('Generate button is disabled after prompt insertion');
+  }
+
+  await reportProgress('starting generation');
   generateBtn.click();
 
   let thumbnailImg = null;
@@ -151,6 +168,7 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   };
 
   const clickableContainer = newFeedElement.querySelector('[data-cy="image-creation-feed-item"]') || newFeedElement;
+  await reportProgress('opening result');
   simulateClick(clickableContainer);
   await sleep(2500);
 
@@ -168,15 +186,20 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
 
   const prepareResponse = await sendRuntimeMessage({
     action: 'prepare_download',
-    filename: `${promptNumber}.png`
+    filename: `${promptNumber}.png`,
+    promptNumber
   });
 
   if (!prepareResponse || !prepareResponse.success) {
     throw new Error('Failed to prepare download interception');
   }
 
+  await reportProgress('downloading image');
   exportBtn.click();
-  await sleep(1500);
+  const downloadResponse = await waitForDownloadCompletion();
+  if (!downloadResponse || !downloadResponse.success) {
+    throw new Error(downloadResponse && downloadResponse.error ? downloadResponse.error : 'Download did not complete');
+  }
 
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
   const closeBtn = document.querySelector('button[aria-label="Close"], button[aria-label="close"]');
@@ -227,36 +250,17 @@ async function syncReferenceImagesForPrompt(promptTags, uploadedReferenceImages,
 
   const uploadedReferenceMap = new Map();
   for (const image of uploadedReferenceImages) {
-    if (!image || !image.tag || !image.dataUrl) continue;
+    if (!image || !image.tag) continue;
     uploadedReferenceMap.set(normalizeTag(image.tag), image);
   }
-
-  const locationRefTag = locationRefNum ? normalizeTag(`@img${locationRefNum}`) : null;
 
   for (const promptTag of promptTags) {
     if (currentStepAborted) throw new Error('Aborted by user');
 
-    if (locationRefTag && promptTag === locationRefTag) {
-      if (promptNumber > 1) {
-        const latestGeneratedImageSrc = getLatestGeneratedImageSrc();
-        if (latestGeneratedImageSrc) {
-          const assignedTag = await addReferenceImageFromUrl(
-            latestGeneratedImageSrc,
-            `${promptTag}.jpg`,
-            promptInputSelector
-          );
-          if (assignedTag) {
-            assignedPromptTags.set(promptTag, assignedTag);
-          }
-        }
-      }
-      continue;
-    }
-
     const matchedReference = uploadedReferenceMap.get(promptTag);
     if (matchedReference) {
-      const assignedTag = await addReferenceImageFromUrl(
-        matchedReference.dataUrl,
+      const assignedTag = await addReferenceImageFromReference(
+        matchedReference,
         `${promptTag}.png`,
         promptInputSelector
       );
@@ -267,6 +271,99 @@ async function syncReferenceImagesForPrompt(promptTags, uploadedReferenceImages,
   }
 
   return assignedPromptTags;
+}
+
+async function enrichPromptWithNamedReferences(promptText, uploadedReferenceImages, promptInputSelector) {
+  const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sortedReferences = [...uploadedReferenceImages]
+    .filter((img) => img && img.id && img.name && img.name.length >= 2)
+    .sort((a, b) => b.name.length - a.name.length);
+
+  if (!sortedReferences.length) {
+    return promptText;
+  }
+
+  const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\band\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const getWords = (str) => new Set(str.split(' ').filter(Boolean));
+  const getOverlap = (s1, s2) => {
+    const w1 = getWords(s1);
+    const w2 = getWords(s2);
+    let count = 0;
+    for (const w of w1) {
+      if (w2.has(w)) count += 1;
+    }
+    return count;
+  };
+
+  let enrichedPromptText = promptText;
+  const promptNorm = normalize(enrichedPromptText);
+  const matches = enrichedPromptText.match(/([A-Z][a-zA-Z0-9\s.\'-]+ \([^)]+\))/g) || [];
+  const matchedStringsToRefs = new Map();
+
+  for (const matchText of matches) {
+    const matchNorm = normalize(matchText);
+    let bestRef = null;
+    let bestScore = -1;
+
+    for (const ref of sortedReferences) {
+      const refNorm = normalize(ref.name);
+      const overlap = getOverlap(matchNorm, refNorm);
+      const refWordCount = getWords(refNorm).size || 1;
+
+      let score = overlap;
+      if (matchNorm === refNorm || matchNorm.includes(refNorm) || refNorm.includes(matchNorm)) {
+        score += 100;
+      }
+
+      const baseNameMatch = refNorm.match(/^([a-z0-9]+)/);
+      const baseName = baseNameMatch ? baseNameMatch[1] : refNorm.split(' ')[0];
+
+      if (matchNorm.includes(baseName) && (overlap / refWordCount >= 0.5) && score > bestScore) {
+        bestScore = score;
+        bestRef = ref;
+      }
+    }
+
+    if (bestRef) {
+      matchedStringsToRefs.set(matchText, bestRef);
+    }
+  }
+
+  for (const ref of sortedReferences) {
+    if (Array.from(matchedStringsToRefs.values()).includes(ref)) {
+      continue;
+    }
+
+    const refNorm = normalize(ref.name);
+    if (promptNorm.includes(refNorm)) {
+      matchedStringsToRefs.set(ref.name, ref);
+    }
+  }
+
+  for (const [exactString, ref] of matchedStringsToRefs.entries()) {
+    const regex = new RegExp(`(?<!as\\s+)(${escapeRegExp(exactString)})`, 'gi');
+    let isReplaced = false;
+    const nextPromptText = enrichedPromptText.replace(regex, (matchedText) => {
+      isReplaced = true;
+      return `[TEMP_TAG] as ${matchedText}`;
+    });
+
+    if (!isReplaced) {
+      continue;
+    }
+
+    const assignedTag = await addReferenceImageFromReference(
+      ref,
+      `${ref.name.substring(0, 30).replace(/[^a-zA-Z0-9_-]/g, '')}.png`,
+      promptInputSelector
+    );
+
+    if (assignedTag) {
+      enrichedPromptText = nextPromptText.replace(/\[TEMP_TAG\]/g, assignedTag);
+    }
+  }
+
+  return enrichedPromptText;
 }
 
 function getLatestGeneratedImageSrc() {
@@ -433,4 +530,172 @@ function sendRuntimeMessage(message) {
       resolve(response);
     });
   });
+}
+
+function waitForDownloadCompletion() {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error('Timed out waiting for download completion'));
+    }, 120000);
+
+    chrome.runtime.sendMessage({ action: 'wait_for_download' }, (response) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
+
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
+
+async function waitForEnabledElement(selector, timeoutMs, pollMs) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (currentStepAborted) {
+      throw new Error('Aborted by user');
+    }
+
+    const element = document.querySelector(selector);
+    if (element && !isElementDisabled(element)) {
+      return element;
+    }
+
+    await sleep(pollMs);
+  }
+
+  return document.querySelector(selector);
+}
+
+function isElementDisabled(element) {
+  if (!element) {
+    return true;
+  }
+
+  return Boolean(
+    element.disabled ||
+    element.getAttribute('aria-disabled') === 'true' ||
+    element.matches('[disabled], [aria-disabled="true"]')
+  );
+}
+
+async function resolveReferenceImage(referenceImage) {
+  if (!referenceImage) {
+    return null;
+  }
+
+  if (referenceImage.dataUrl) {
+    return referenceImage;
+  }
+
+  const imageId = String(referenceImage.id || '').trim();
+  if (!imageId) {
+    return null;
+  }
+
+  const response = await sendRuntimeMessage({
+    action: 'get_reference_image_data',
+    imageId
+  });
+
+  if (!response || !response.success || !response.image || !response.image.dataUrl) {
+    throw new Error(response && response.error ? response.error : 'Failed to resolve reference image');
+  }
+
+  return response.image;
+}
+
+function getPromptEditorText(promptInput) {
+  if (!promptInput) {
+    return '';
+  }
+
+  return String(
+    promptInput.innerText ||
+    promptInput.textContent ||
+    promptInput.getAttribute('value') ||
+    ''
+  ).trim();
+}
+
+async function setPromptEditorText(promptInput, text) {
+  const value = String(text || '');
+
+  promptInput.focus();
+
+  if (document.execCommand) {
+    document.execCommand('selectAll', false, null);
+    document.execCommand('delete', false, null);
+    document.execCommand('insertText', false, value);
+  }
+
+  if (getPromptEditorText(promptInput) === value) {
+    dispatchPromptInputEvents(promptInput);
+    return;
+  }
+
+  promptInput.innerHTML = '';
+  promptInput.textContent = value;
+  dispatchPromptInputEvents(promptInput);
+
+  await sleep(100);
+
+  if (getPromptEditorText(promptInput) === value) {
+    return;
+  }
+
+  promptInput.innerHTML = '';
+  const textNode = document.createTextNode(value);
+  promptInput.appendChild(textNode);
+  dispatchPromptInputEvents(promptInput);
+}
+
+function dispatchPromptInputEvents(promptInput) {
+  promptInput.dispatchEvent(new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    data: promptInput.textContent || '',
+    inputType: 'insertText'
+  }));
+
+  promptInput.dispatchEvent(new InputEvent('input', {
+    bubbles: true,
+    cancelable: true,
+    data: promptInput.textContent || '',
+    inputType: 'insertText'
+  }));
+
+  promptInput.dispatchEvent(new Event('change', {
+    bubbles: true
+  }));
+}
+
+async function reportProgress(stage) {
+  try {
+    await sendRuntimeMessage({ action: 'progress_update', stage });
+  } catch (error) {
+    console.debug('Progress update failed:', error);
+  }
+}
+
+async function addReferenceImageFromReference(referenceImage, fileName, promptInputSelector) {
+  const resolvedReference = await resolveReferenceImage(referenceImage);
+  if (!resolvedReference || !resolvedReference.dataUrl) {
+    return null;
+  }
+
+  return addReferenceImageFromUrl(resolvedReference.dataUrl, fileName, promptInputSelector);
 }

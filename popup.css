@@ -375,3 +375,69 @@ label {
   justify-content: center;
   backdrop-filter: blur(4px);
 }
+
+.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+  box-shadow: none;
+  border: 1px solid var(--border-color);
+}
+.secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 11px;
+  height: 28px;
+}
+.action-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.custom-details {
+  background: rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.custom-details summary {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-main);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.03);
+  transition: background 0.2s;
+}
+.custom-details summary:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.custom-details[open] summary {
+  border-bottom: 1px solid var(--border-color);
+}
+.custom-details .image-tag-list {
+  padding: 10px;
+}
+.icon-btn-small {
+  background: rgba(99, 102, 241, 0.16);
+  color: var(--primary);
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.icon-btn-small:hover {
+  background: rgba(99, 102, 241, 0.28);
+  border-color: var(--primary);
+}
+#mainView { opacity: 0; transition: opacity 0.15s ease-out; }
+#mainView.loaded { opacity: 1; }

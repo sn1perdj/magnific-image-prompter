@@ -1,19 +1,35 @@
 const WORKFLOW_STORAGE_KEY = 'magnificWorkflowState';
 const MAX_RECOVERY_ATTEMPTS = 5;
+const REFERENCE_IMAGE_DB_NAME = 'magnificAutomatorDb';
+const REFERENCE_IMAGE_STORE = 'referenceImages';
+const ACTIVE_WORKFLOW_IMAGES_KEY = 'active-workflow-images';
 let restoreStarted = false;
-let expectedDownloadFilename = null;
-let expectedDownloadTimeout = null;
+let pendingDownload = null;
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  if (expectedDownloadFilename) {
-    suggest({ filename: expectedDownloadFilename });
-    expectedDownloadFilename = null;
-    if (expectedDownloadTimeout) {
-      clearTimeout(expectedDownloadTimeout);
-      expectedDownloadTimeout = null;
-    }
+  if (pendingDownload && pendingDownload.expectedFilename) {
+    pendingDownload.downloadId = item.id;
+    suggest({
+      filename: pendingDownload.expectedFilename,
+      conflictAction: 'overwrite'
+    });
   } else {
     suggest();
+  }
+});
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!pendingDownload || delta.id !== pendingDownload.downloadId) {
+    return;
+  }
+
+  if (delta.error && delta.error.current) {
+    failPendingDownload(`Download failed: ${delta.error.current}`);
+    return;
+  }
+
+  if (delta.state && delta.state.current === 'complete') {
+    finalizePendingDownload(delta.id);
   }
 });
 
@@ -27,8 +43,7 @@ let workflowState = {
   tabId: null,
   status: 'Ready',
   retryCount: 0,
-  locationRefNum: null,
-  uploadedReferenceImages: []
+  locationRefNum: null
 };
 
 restoreWorkflowState();
@@ -50,8 +65,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: null,
       status: `Starting Column ${message.colLetter || 'E'}...`,
       retryCount: 0,
-      locationRefNum: message.locationRefNum || null,
-      uploadedReferenceImages: Array.isArray(message.uploadedReferenceImages) ? message.uploadedReferenceImages : []
+      locationRefNum: message.locationRefNum || null
     };
     persistWorkflowState();
 
@@ -75,20 +89,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     persistWorkflowState();
     if (workflowState.tabId) {
       chrome.tabs.sendMessage(workflowState.tabId, { action: 'abort_step' }, () => {
-        const err = chrome.runtime.lastError; // ignore error
+        chrome.runtime.lastError;
       });
     }
     updateStatus('Workflow stopped.', true);
   } else if (message.action === 'prepare_download') {
-    expectedDownloadFilename = message.filename;
-    if (expectedDownloadTimeout) clearTimeout(expectedDownloadTimeout);
-    expectedDownloadTimeout = setTimeout(() => {
-      expectedDownloadFilename = null;
-    }, 15000);
-    sendResponse({ success: true });
+    preparePendingDownload(message.filename, message.promptNumber)
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  } else if (message.action === 'wait_for_download') {
+    if (!pendingDownload) {
+      sendResponse({ success: false, error: 'No pending download to wait for' });
+      return true;
+    }
+
+    if (pendingDownload.result) {
+      const result = pendingDownload.result;
+      cleanupPendingDownload();
+      sendResponse(result);
+      return true;
+    }
+
+    pendingDownload.waiters.push(sendResponse);
     return true;
   } else if (message.action === 'keep_alive_ping') {
-    // This message just keeps the service worker from suspending
     sendResponse({ ok: true });
     return true;
   } else if (message.action === 'step_completed') {
@@ -104,6 +129,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       recoverFromError(message.error || 'Unknown error');
     }
     return true;
+  } else if (message.action === 'progress_update') {
+    if (!workflowState.active) {
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
+    const stage = String(message.stage || '').trim();
+    const suffix = stage ? `: ${stage}` : '';
+    updateStatus(`Processing prompt ${workflowState.colLetter}${visualPromptNumber}${suffix}`);
+    sendResponse({ ok: true });
+    return true;
+  } else if (message.action === 'get_reference_image_data') {
+    loadActiveWorkflowImages()
+      .then((images) => {
+        const imageId = String(message.imageId || '').trim();
+        const image = images.find((entry) => String(entry.id || '').trim() === imageId);
+        if (!image || !image.dataUrl) {
+          sendResponse({ success: false, error: 'Reference image not found' });
+          return;
+        }
+
+        sendResponse({
+          success: true,
+          image: {
+            id: image.id,
+            tag: image.tag,
+            name: image.name,
+            dataUrl: image.dataUrl
+          }
+        });
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message || 'Failed to load reference image' });
+      });
+    return true;
+  } else if (message.action === 'character_reference_added' || message.action === 'location_reference_added') {
+    chrome.runtime.sendMessage(message).catch(() => {});
+    loadActiveWorkflowImages().then((currentImages) => {
+      const exists = currentImages.find(img => img.name && img.name.toLowerCase() === message.name.toLowerCase());
+      if (!exists) {
+        const usedTags = new Set(currentImages.map(img => String(img.tag || '').trim().toLowerCase()));
+        let candidateNumber = 1;
+        while (usedTags.has(`@img${candidateNumber}`)) {
+          candidateNumber++;
+        }
+        const newTag = `@img${candidateNumber}`;
+        currentImages.push({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          tag: newTag,
+          name: message.name,
+          dataUrl: message.dataUrl
+        });
+        persistActiveWorkflowImages(currentImages).catch(console.error);
+      }
+    }).catch(console.error);
+    sendResponse({ ok: true });
+    return true;
   }
 });
 
@@ -117,43 +200,62 @@ function processNextPrompt() {
   const prompt = workflowState.prompts[workflowState.currentIndex];
   const visualPromptNumber = workflowState.currentIndex + workflowState.startIndexOffset + 1;
 
-  // Skip empty rows (e.g. if E5/F5/G5 was empty)
   if (!prompt || prompt.trim() === '') {
     workflowState.currentIndex++;
     workflowState.retryCount = 0;
     persistWorkflowState();
-    processNextPrompt(); // go to next immediately
+    processNextPrompt();
     return;
   }
 
   updateStatus(`Processing prompt ${workflowState.colLetter}${visualPromptNumber}...`);
 
-  // Wait a bit before starting to ensure UI is ready
-  setTimeout(() => {
+  setTimeout(async () => {
     if (!workflowState.active) return;
-    chrome.tabs.sendMessage(workflowState.tabId, { 
-      action: 'execute_step', 
-      prompt: prompt, 
-      promptNumber: visualPromptNumber,
-      locationRefNum: workflowState.locationRefNum,
-      uploadedReferenceImages: workflowState.uploadedReferenceImages
-    }, (response) => {
+
+    let uploadedReferenceImages = [];
+    try {
+      uploadedReferenceImages = await loadActiveWorkflowImages();
+    } catch (error) {
+      console.error('Failed to load workflow reference images:', error);
+    }
+
+    let matchedImages = [];
+    if (uploadedReferenceImages && uploadedReferenceImages.length > 0) {
+      const locTag = workflowState.locationRefNum ? `@img${workflowState.locationRefNum}` : null;
+      
+      matchedImages = uploadedReferenceImages.filter(img => {
+        if (!img.name || img.name.length < 2) return false;
+        if (locTag && img.tag === locTag) return true;
+        const firstWord = img.name.trim().split(/[\s(]/)[0].toLowerCase();
+        return prompt.toLowerCase().includes(firstWord);
+      });
+    }
+
+    const matchedImageRefs = matchedImages.map((img) => ({
+      id: img.id,
+      tag: img.tag,
+      name: img.name
+    }));
+
+      chrome.tabs.sendMessage(workflowState.tabId, {
+        action: 'execute_step',
+        prompt: prompt,
+        promptNumber: visualPromptNumber,
+        locationRefNum: workflowState.locationRefNum,
+        workflowType: workflowState.colLetter === 'E' ? 'character' : (workflowState.colLetter === 'F' ? 'location' : 'image'),
+        uploadedReferenceImages: matchedImageRefs      }, (response) => {
       if (chrome.runtime.lastError) {
         const msg = chrome.runtime.lastError.message;
-        // The port can close during long 10-minute generations.
-        // We only want to recover if the tab is completely dead.
         if (msg && msg.includes('Receiving end does not exist')) {
           recoverFromError(`Tab dead: ${msg}`);
         }
         return;
       }
-      
+
       if (response && response.success === false && response.error === 'Already executing') {
-        // Just let the executing one finish and send step_completed
         return;
       }
-      
-      // We rely on 'step_completed' message for advancing to prevent double execution.
     });
   }, 2000);
 }
@@ -247,6 +349,102 @@ function persistWorkflowState() {
   chrome.storage.local.set({ [WORKFLOW_STORAGE_KEY]: workflowState });
 }
 
+function preparePendingDownload(filename, promptNumber) {
+  if (!filename) {
+    return Promise.reject(new Error('Download filename is required'));
+  }
+
+  if (pendingDownload) {
+    return Promise.reject(new Error('Another download is already pending'));
+  }
+
+  pendingDownload = {
+    expectedFilename: filename,
+    expectedPromptNumber: String(promptNumber || '').trim(),
+    downloadId: null,
+    result: null,
+    waiters: [],
+    timeoutId: setTimeout(() => {
+      failPendingDownload(`Timed out waiting for download ${filename}`);
+    }, 120000)
+  };
+
+  return Promise.resolve();
+}
+
+function failPendingDownload(errorMessage) {
+  if (!pendingDownload) {
+    return;
+  }
+
+  pendingDownload.result = { success: false, error: errorMessage };
+  const waiters = pendingDownload.waiters.splice(0, pendingDownload.waiters.length);
+  for (const respond of waiters) {
+    respond(pendingDownload.result);
+  }
+
+  if (waiters.length > 0) {
+    cleanupPendingDownload();
+  }
+}
+
+function cleanupPendingDownload() {
+  if (!pendingDownload) {
+    return;
+  }
+
+  if (pendingDownload.timeoutId) {
+    clearTimeout(pendingDownload.timeoutId);
+  }
+
+  pendingDownload = null;
+}
+
+function finalizePendingDownload(downloadId) {
+  chrome.downloads.search({ id: downloadId }, (items) => {
+    if (chrome.runtime.lastError) {
+      failPendingDownload(chrome.runtime.lastError.message || 'Failed to inspect completed download');
+      return;
+    }
+
+    const item = Array.isArray(items) ? items[0] : null;
+    if (!item) {
+      failPendingDownload('Completed download could not be found');
+      return;
+    }
+
+    const actualFilename = getBasename(item.filename || item.finalUrl || '');
+    const expectedFilename = pendingDownload ? getBasename(pendingDownload.expectedFilename) : '';
+    const expectedPromptNumber = pendingDownload ? pendingDownload.expectedPromptNumber : '';
+    const actualFileNumber = actualFilename.replace(/\.[^.]+$/, '');
+
+    if (actualFilename !== expectedFilename || actualFileNumber !== expectedPromptNumber) {
+      failPendingDownload(
+        `Downloaded file mismatch. Expected ${expectedFilename} for prompt ${expectedPromptNumber}, got ${actualFilename}`
+      );
+      return;
+    }
+
+    pendingDownload.result = {
+      success: true,
+      filename: actualFilename,
+      promptNumber: expectedPromptNumber
+    };
+    const waiters = pendingDownload.waiters.splice(0, pendingDownload.waiters.length);
+    for (const respond of waiters) {
+      respond(pendingDownload.result);
+    }
+
+    if (waiters.length > 0) {
+      cleanupPendingDownload();
+    }
+  });
+}
+
+function getBasename(filePath) {
+  return String(filePath || '').split(/[\\/]/).pop() || '';
+}
+
 function updateStatus(status, done = false) {
   workflowState.status = status;
   if (done) workflowState.active = false;
@@ -272,5 +470,53 @@ function waitForTabLoad(tabId, callback) {
       };
       chrome.tabs.onUpdated.addListener(listener);
     }
+  });
+}
+
+function openReferenceImageDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(REFERENCE_IMAGE_DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(REFERENCE_IMAGE_STORE)) {
+        db.createObjectStore(REFERENCE_IMAGE_STORE);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Failed to open image database'));
+  });
+}
+
+async function persistActiveWorkflowImages(images) {
+  const db = await openReferenceImageDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
+    const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+    store.put(images, ACTIVE_WORKFLOW_IMAGES_KEY);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onabort = () => reject(transaction.error || new Error('Failed to persist workflow images'));
+    transaction.onerror = () => reject(transaction.error || new Error('Failed to persist workflow images'));
+  });
+}
+
+async function loadActiveWorkflowImages() {
+  const db = await openReferenceImageDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
+    const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+    const request = store.get(ACTIVE_WORKFLOW_IMAGES_KEY);
+
+    request.onsuccess = () => {
+      resolve(Array.isArray(request.result) ? request.result : []);
+    };
+    request.onerror = () => reject(request.error || new Error('Failed to load workflow images'));
+    transaction.oncomplete = () => db.close();
+    transaction.onabort = () => reject(transaction.error || new Error('Failed to load workflow images'));
   });
 }

@@ -1,4 +1,11 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const REFERENCE_IMAGE_DB_NAME = 'magnificAutomatorDb';
+  const REFERENCE_IMAGE_STORE = 'referenceImages';
+  const SAVED_REFERENCE_IMAGES_KEY = 'saved-images';
+  const SAVED_CHARACTER_REFERENCES_KEY = 'saved-character-images';
+  const SAVED_LOCATION_REFERENCES_KEY = 'saved-location-images';
+  const ACTIVE_WORKFLOW_IMAGES_KEY = 'active-workflow-images';
+
   const mainView = document.getElementById('mainView');
   const settingsView = document.getElementById('settingsView');
 
@@ -12,9 +19,25 @@ document.addEventListener('DOMContentLoaded', () => {
   const startFromInput = document.getElementById('startFrom');
   const singlePromptInput = document.getElementById('singlePrompt');
   const locationRefNumInput = document.getElementById('locationRefNum');
-  const addImageBtn = document.getElementById('addImageBtn');
-  const imageUploadInput = document.getElementById('imageUploadInput');
-  const imageTagList = document.getElementById('imageTagList');
+  const addCharacterImagesBtn = document.getElementById('addCharacterImagesBtn');
+  const characterUploadInput = document.getElementById('characterUploadInput');
+  const importCharacterSheetBtn = document.getElementById('importCharacterSheetBtn');
+  const characterImportTagList = document.getElementById('characterImportTagList');
+  const imageCharacterSection = document.getElementById('imageCharacterSection');
+
+  const addLocationImagesBtn = document.getElementById('addLocationImagesBtn');
+  const locationUploadInput = document.getElementById('locationUploadInput');
+  const importLocationSheetBtn = document.getElementById('importLocationSheetBtn');
+  const locationImportTagList = document.getElementById('locationImportTagList');
+  const imageLocationSection = document.getElementById('imageLocationSection');
+
+  const subTabButtons = document.querySelectorAll('.sub-tab');
+
+  const clearLocationsBtn = document.getElementById('clearLocationsBtn');
+  const clearCharactersBtn = document.getElementById('clearCharactersBtn');
+  const clearImportCharactersBtn = document.getElementById('clearImportCharactersBtn');
+  const clearImportLocationsBtn = document.getElementById('clearImportLocationsBtn');
+
   const statusBox = document.getElementById('status');
 
   const TAB_COLUMNS = {
@@ -23,22 +46,170 @@ document.addEventListener('DOMContentLoaded', () => {
     image: { index: 0, letter: 'G' }
   };
 
+  const tabButtons = document.querySelectorAll('.tab:not(.sub-tab)');
+  const locationRefSection = document.getElementById('locationRefSection');
+  const imageManagerSection = document.getElementById('imageManagerSection');
+  const locationManagerSection = document.getElementById('locationManagerSection');
+  const locationTagList = document.getElementById('locationTagList');
+  const characterManagerSection = document.getElementById('characterManagerSection');
+  const characterTagList = document.getElementById('characterTagList');
+
   let activeTab = 'character';
   let currentSheetLink = '';
   let uploadedReferenceImages = [];
+  let capturedCharacterReferences = [];
+  let capturedLocationReferences = [];
 
-  const tabButtons = document.querySelectorAll('.tab');
-  const locationRefSection = document.getElementById('locationRefSection');
-  const imageManagerSection = document.getElementById('imageManagerSection');
+  function openReferenceImageDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(REFERENCE_IMAGE_DB_NAME, 1);
 
-  function saveInputs() {
-    chrome.storage.local.set({
-      savedStartFrom: startFromInput.value,
-      savedSinglePrompt: singlePromptInput.value,
-      savedLocationRefNum: locationRefNumInput.value,
-      savedActiveTab: activeTab,
-      savedUploadedReferenceImages: uploadedReferenceImages
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(REFERENCE_IMAGE_STORE)) {
+          db.createObjectStore(REFERENCE_IMAGE_STORE);
+        }
+      };
+
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Failed to open image database'));
     });
+  }
+
+  async function persistActiveWorkflowImages(images) {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      store.put(images, ACTIVE_WORKFLOW_IMAGES_KEY);
+
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to persist workflow images'));
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to persist workflow images'));
+    });
+  }
+
+  async function loadReferenceImagesFromDb() {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      const request = store.get(SAVED_REFERENCE_IMAGES_KEY);
+
+      request.onsuccess = () => {
+        resolve(Array.isArray(request.result) ? request.result : []);
+      };
+      request.onerror = () => reject(request.error || new Error('Failed to load saved reference images'));
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to load saved reference images'));
+    });
+  }
+
+  async function saveReferenceImagesToDb(images) {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      store.put(images, SAVED_REFERENCE_IMAGES_KEY);
+
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to save reference images'));
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to save reference images'));
+    });
+  }
+
+  async function loadCharacterReferencesFromDb() {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      const request = store.get(SAVED_CHARACTER_REFERENCES_KEY);
+
+      request.onsuccess = () => {
+        resolve(Array.isArray(request.result) ? request.result : []);
+      };
+      request.onerror = () => reject(request.error || new Error('Failed to load saved character references'));
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to load saved character references'));
+    });
+  }
+
+  async function saveCharacterReferencesToDb(images) {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      store.put(images, SAVED_CHARACTER_REFERENCES_KEY);
+
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to save character references'));
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to save character references'));
+    });
+  }
+
+  async function loadLocationReferencesFromDb() {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      const request = store.get(SAVED_LOCATION_REFERENCES_KEY);
+
+      request.onsuccess = () => {
+        resolve(Array.isArray(request.result) ? request.result : []);
+      };
+      request.onerror = () => reject(request.error || new Error('Failed to load saved location references'));
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to load saved location references'));
+    });
+  }
+
+  async function saveLocationReferencesToDb(images) {
+    const db = await openReferenceImageDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
+      const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
+      store.put(images, SAVED_LOCATION_REFERENCES_KEY);
+
+      transaction.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      transaction.onabort = () => reject(transaction.error || new Error('Failed to save location references'));
+      transaction.onerror = () => reject(transaction.error || new Error('Failed to save location references'));
+    });
+  }
+
+  async function saveInputs() {
+    await Promise.all([
+      new Promise((resolve, reject) => {
+        chrome.storage.local.set({
+          savedStartFrom: startFromInput.value,
+          savedSinglePrompt: singlePromptInput.value,
+          savedLocationRefNum: locationRefNumInput.value,
+          savedActiveTab: activeTab,
+          savedActiveSubTab: document.querySelector('.sub-tab.active')?.getAttribute('data-subtab') || 'image-character'
+        }, () => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+
+          resolve();
+        });
+      }),
+      saveReferenceImagesToDb(uploadedReferenceImages),
+      saveCharacterReferencesToDb(capturedCharacterReferences),
+      saveLocationReferencesToDb(capturedLocationReferences)
+    ]);
   }
 
   function setActiveTab(tabName) {
@@ -48,8 +219,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     const isImageTab = tabName === 'image';
-    locationRefSection.style.display = isImageTab ? 'flex' : 'none';
+    const isCharacterTab = tabName === 'character';
+    const isLocationTab = tabName === 'location';
+    
+    locationRefSection.style.display = isLocationTab ? 'flex' : 'none';
+    locationManagerSection.style.display = isLocationTab ? 'flex' : 'none';
+    
     imageManagerSection.style.display = isImageTab ? 'flex' : 'none';
+    characterManagerSection.style.display = isCharacterTab ? 'flex' : 'none';
   }
 
   function normalizeTag(value, fallbackTag) {
@@ -83,18 +260,44 @@ document.addEventListener('DOMContentLoaded', () => {
     return `@img${candidateNumber}`;
   }
 
-  function renderUploadedImages() {
-    imageTagList.innerHTML = '';
+  function getNextCharacterTag() {
+    const usedTags = new Set(
+      capturedCharacterReferences.map((image) => normalizeTag(image.tag, '@img1'))
+    );
 
-    if (uploadedReferenceImages.length === 0) {
+    let candidateNumber = 1;
+    while (usedTags.has(`@img${candidateNumber}`)) {
+      candidateNumber += 1;
+    }
+
+    return `@img${candidateNumber}`;
+  }
+
+  function getNextLocationTag() {
+    const usedTags = new Set(
+      capturedLocationReferences.map((image) => normalizeTag(image.tag, '@img1'))
+    );
+
+    let candidateNumber = 1;
+    while (usedTags.has(`@img${candidateNumber}`)) {
+      candidateNumber += 1;
+    }
+
+    return `@img${candidateNumber}`;
+  }
+
+  function renderCharacterReferences() {
+    characterTagList.innerHTML = '';
+
+    if (capturedCharacterReferences.length === 0) {
       const emptyState = document.createElement('div');
       emptyState.className = 'image-tag-empty';
-      emptyState.textContent = 'No reference images added yet.';
-      imageTagList.appendChild(emptyState);
+      emptyState.textContent = 'No character references auto-captured yet.';
+      characterTagList.appendChild(emptyState);
       return;
     }
 
-    uploadedReferenceImages.forEach((image, index) => {
+    capturedCharacterReferences.forEach((image, index) => {
       const item = document.createElement('div');
       item.className = 'image-tag-item';
 
@@ -106,29 +309,113 @@ document.addEventListener('DOMContentLoaded', () => {
       const meta = document.createElement('div');
       meta.className = 'image-tag-meta';
 
-      const tagInput = document.createElement('input');
-      tagInput.type = 'text';
-      tagInput.className = 'input-field tag-input';
-      tagInput.value = image.tag;
-      tagInput.placeholder = '@img1';
-      tagInput.addEventListener('change', () => {
-        const fallbackTag = `@img${index + 1}`;
-        uploadedReferenceImages[index].tag = normalizeTag(tagInput.value, fallbackTag);
-        renderUploadedImages();
-        saveInputs();
+      const nameLabel = document.createElement('div');
+      nameLabel.className = 'image-name';
+      nameLabel.textContent = image.name;
+      nameLabel.style.fontWeight = '500';
+
+      meta.appendChild(nameLabel);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'remove-image-btn';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        capturedCharacterReferences.splice(index, 1);
+        renderCharacterReferences();
+        void saveInputs();
       });
-      tagInput.addEventListener('blur', () => {
-        const fallbackTag = `@img${index + 1}`;
-        uploadedReferenceImages[index].tag = normalizeTag(tagInput.value, fallbackTag);
-        renderUploadedImages();
-        saveInputs();
+
+      item.appendChild(thumb);
+      item.appendChild(meta);
+      item.appendChild(removeBtn);
+      characterTagList.appendChild(item);
+    });
+  }
+
+  function renderLocationReferences() {
+    locationTagList.innerHTML = '';
+
+    if (capturedLocationReferences.length === 0) {
+      const emptyState = document.createElement('div');
+      emptyState.className = 'image-tag-empty';
+      emptyState.textContent = 'No location references auto-captured yet.';
+      locationTagList.appendChild(emptyState);
+      return;
+    }
+
+    capturedLocationReferences.forEach((image, index) => {
+      const item = document.createElement('div');
+      item.className = 'image-tag-item';
+
+      const thumb = document.createElement('img');
+      thumb.className = 'image-thumb';
+      thumb.src = image.dataUrl;
+      thumb.alt = image.tag;
+
+      const meta = document.createElement('div');
+      meta.className = 'image-tag-meta';
+
+      const nameLabel = document.createElement('div');
+      nameLabel.className = 'image-name';
+      nameLabel.textContent = image.name;
+      nameLabel.style.fontWeight = '500';
+
+      meta.appendChild(nameLabel);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'remove-image-btn';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        capturedLocationReferences.splice(index, 1);
+        renderLocationReferences();
+        void saveInputs();
       });
+
+      item.appendChild(thumb);
+      item.appendChild(meta);
+      item.appendChild(removeBtn);
+      locationTagList.appendChild(item);
+    });
+  }
+
+  function renderUploadedImages() {
+    const characterImages = uploadedReferenceImages.filter(img => img.type === 'character' || !img.type);
+    const locationImages = uploadedReferenceImages.filter(img => img.type === 'location');
+
+    renderSubTagList(characterImportTagList, characterImages, 'character');
+    renderSubTagList(locationImportTagList, locationImages, 'location');
+  }
+
+  function renderSubTagList(container, images, type) {
+    container.innerHTML = '';
+    if (images.length === 0) {
+      const emptyState = document.createElement('div');
+      emptyState.className = 'image-tag-empty';
+      emptyState.textContent = `No ${type} references added yet.`;
+      container.appendChild(emptyState);
+      return;
+    }
+
+    images.forEach((image) => {
+      const index = uploadedReferenceImages.indexOf(image);
+      const item = document.createElement('div');
+      item.className = 'image-tag-item';
+
+      const thumb = document.createElement('img');
+      thumb.className = 'image-thumb';
+      thumb.src = image.dataUrl;
+      thumb.alt = image.tag;
+
+      const meta = document.createElement('div');
+      meta.className = 'image-tag-meta';
 
       const imageName = document.createElement('div');
       imageName.className = 'image-name';
       imageName.textContent = image.name || `Reference ${index + 1}`;
+      imageName.style.fontWeight = '500';
 
-      meta.appendChild(tagInput);
       meta.appendChild(imageName);
 
       const removeBtn = document.createElement('button');
@@ -138,13 +425,13 @@ document.addEventListener('DOMContentLoaded', () => {
       removeBtn.addEventListener('click', () => {
         uploadedReferenceImages.splice(index, 1);
         renderUploadedImages();
-        saveInputs();
+        void saveInputs();
       });
 
       item.appendChild(thumb);
       item.appendChild(meta);
       item.appendChild(removeBtn);
-      imageTagList.appendChild(item);
+      container.appendChild(item);
     });
   }
 
@@ -157,7 +444,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  async function handleImageFiles(fileList) {
+  async function handleImageFiles(fileList, type) {
     const files = Array.from(fileList || []);
     if (files.length === 0) {
       return;
@@ -169,47 +456,200 @@ document.addEventListener('DOMContentLoaded', () => {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         tag: getNextDefaultTag(),
         name: file.name,
+        type: type,
         dataUrl
       });
     }
 
     renderUploadedImages();
-    saveInputs();
+    await saveInputs();
   }
 
   function buildUploadedReferencePayload() {
-    return uploadedReferenceImages.map((image, index) => ({
-      id: image.id,
-      tag: normalizeTag(image.tag, `@img${index + 1}`),
-      name: image.name,
-      dataUrl: image.dataUrl
-    }));
+    if (activeTab === 'character') {
+      return capturedCharacterReferences.map((image, index) => ({
+        id: image.id,
+        tag: normalizeTag(image.tag, `@img${index + 1}`),
+        name: image.name,
+        dataUrl: image.dataUrl
+      }));
+    } else if (activeTab === 'location') {
+      return capturedLocationReferences.map((image, index) => ({
+        id: image.id,
+        tag: normalizeTag(image.tag, `@img${index + 1}`),
+        name: image.name,
+        dataUrl: image.dataUrl
+      }));
+    } else {
+      return uploadedReferenceImages.map((image, index) => ({
+        id: image.id,
+        tag: normalizeTag(image.tag, `@img${index + 1}`),
+        name: image.name,
+        dataUrl: image.dataUrl
+      }));
+    }
   }
 
   tabButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       setActiveTab(btn.getAttribute('data-tab'));
-      saveInputs();
+      void saveInputs();
     });
   });
 
-  addImageBtn.addEventListener('click', () => imageUploadInput.click());
-  imageUploadInput.addEventListener('change', async () => {
+  function setActiveSubTab(tabName) {
+    subTabButtons.forEach((button) => {
+      button.classList.toggle('active', button.getAttribute('data-subtab') === tabName);
+    });
+    
+    imageCharacterSection.style.display = tabName === 'image-character' ? 'block' : 'none';
+    imageLocationSection.style.display = tabName === 'image-location' ? 'block' : 'none';
+  }
+
+  subTabButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setActiveSubTab(btn.getAttribute('data-subtab'));
+      void saveInputs();
+    });
+  });
+
+  addCharacterImagesBtn.addEventListener('click', () => characterUploadInput.click());
+  characterUploadInput.addEventListener('change', async () => {
     try {
-      await handleImageFiles(imageUploadInput.files);
+      await handleImageFiles(characterUploadInput.files, 'character');
     } finally {
-      imageUploadInput.value = '';
+      characterUploadInput.value = '';
     }
   });
 
-  chrome.storage.local.get([
-    'magnificSheetLink',
-    'savedStartFrom',
-    'savedSinglePrompt',
-    'savedLocationRefNum',
-    'savedActiveTab',
-    'savedUploadedReferenceImages'
-  ], (result) => {
+  addLocationImagesBtn.addEventListener('click', () => locationUploadInput.click());
+  locationUploadInput.addEventListener('change', async () => {
+    try {
+      await handleImageFiles(locationUploadInput.files, 'location');
+    } finally {
+      locationUploadInput.value = '';
+    }
+  });
+
+  importCharacterSheetBtn.addEventListener('click', () => importAndRenameFromSheet('character'));
+  importLocationSheetBtn.addEventListener('click', () => importAndRenameFromSheet('location'));
+
+  clearLocationsBtn.addEventListener('click', () => {
+    capturedLocationReferences = [];
+    renderLocationReferences();
+    void saveInputs();
+  });
+
+  clearCharactersBtn.addEventListener('click', () => {
+    capturedCharacterReferences = [];
+    renderCharacterReferences();
+    void saveInputs();
+  });
+
+  clearImportCharactersBtn.addEventListener('click', () => {
+    uploadedReferenceImages = uploadedReferenceImages.filter(img => img.type !== 'character' && img.type !== undefined);
+    renderUploadedImages();
+    void saveInputs();
+  });
+
+  clearImportLocationsBtn.addEventListener('click', () => {
+    uploadedReferenceImages = uploadedReferenceImages.filter(img => img.type !== 'location');
+    renderUploadedImages();
+    void saveInputs();
+  });
+
+  async function importAndRenameFromSheet(type) {
+    const targetImages = uploadedReferenceImages.filter(img => (type === 'character' ? (img.type === 'character' || !img.type) : img.type === 'location'));
+    if (targetImages.length === 0) {
+      alert(`No ${type} images to rename.`);
+      return;
+    }
+    
+    const colLetter = type === 'character' ? 'E' : 'F';
+    const sheetLink = currentSheetLink || sheetLinkInput.value.trim();
+    if (!sheetLink || !sheetLink.includes('/d/')) {
+      alert('Please configure a valid Google Sheet link in settings first.');
+      return;
+    }
+
+    statusBox.textContent = `Fetching Column ${colLetter} for renaming...`;
+    
+    try {
+      const sheetIdMatch = sheetLink.match(/\/d\/([a-zA-Z0-9-_]+)/);
+      if (!sheetIdMatch) throw new Error('Could not extract Sheet ID');
+      const sheetId = sheetIdMatch[1];
+
+      const csvUrl = new URL(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq`);
+      csvUrl.searchParams.set('tqx', 'out:csv');
+      csvUrl.searchParams.set('range', `${colLetter}:${colLetter}`);
+
+      const gidMatch = sheetLink.match(/[#&?]gid=([0-9]+)/);
+      if (gidMatch) {
+        csvUrl.searchParams.set('gid', gidMatch[1]);
+      }
+
+      const response = await fetch(csvUrl.toString());
+      if (!response.ok) throw new Error('Failed to fetch sheet.');
+
+      const csvText = await response.text();
+      const prompts = parseCsvColumn(csvText, 0);
+
+      let renamedCount = 0;
+      targetImages.forEach((img) => {
+         const numMatch = img.name.match(/^(\d+)/);
+         if (numMatch) {
+           const num = parseInt(numMatch[1], 10);
+           const rowIndex = num - 1;
+           if (prompts[rowIndex]) {
+             let extractedName = prompts[rowIndex].split(/[:;]/)[0].trim();
+             
+             if (type === 'character') {
+               const charMatch = prompts[rowIndex].match(/([A-Z][a-zA-Z0-9\s.\'-]+ \([^)]+\))/);
+               if (charMatch) {
+                 extractedName = charMatch[1].trim();
+               }
+             }
+             
+             if (extractedName) {
+               img.name = extractedName;
+               renamedCount++;
+             }
+           }
+         }
+      });
+      
+      renderUploadedImages();
+      await saveInputs();
+      statusBox.textContent = `Renamed ${renamedCount} images from Column ${colLetter}.`;
+    } catch (err) {
+      alert(`Error importing from sheet: ${err.message}`);
+      statusBox.textContent = 'Ready';
+    }
+  }
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      chrome.storage.local.get([
+        'magnificSheetLink',
+        'savedStartFrom',
+        'savedSinglePrompt',
+        'savedLocationRefNum',
+        'savedActiveTab',
+        'savedActiveSubTab',
+        'savedUploadedReferenceImages'
+      ], (result) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+
+        resolve(result);
+      });
+    }),
+    loadReferenceImagesFromDb().catch(() => []),
+    loadCharacterReferencesFromDb().catch(() => []),
+    loadLocationReferencesFromDb().catch(() => [])
+  ]).then(async ([result, savedImagesFromDb, savedCharacterRefsFromDb, savedLocationRefsFromDb]) => {
     if (result.magnificSheetLink) {
       currentSheetLink = result.magnificSheetLink;
       sheetLinkInput.value = currentSheetLink;
@@ -218,15 +658,46 @@ document.addEventListener('DOMContentLoaded', () => {
     if (result.savedStartFrom !== undefined) startFromInput.value = result.savedStartFrom;
     if (result.savedSinglePrompt !== undefined) singlePromptInput.value = result.savedSinglePrompt;
     if (result.savedLocationRefNum !== undefined) locationRefNumInput.value = result.savedLocationRefNum;
-    if (Array.isArray(result.savedUploadedReferenceImages)) {
-      uploadedReferenceImages = result.savedUploadedReferenceImages.map((image, index) => ({
+
+    const legacySavedImages = Array.isArray(result.savedUploadedReferenceImages)
+      ? result.savedUploadedReferenceImages
+      : [];
+    const sourceImages = savedImagesFromDb.length ? savedImagesFromDb : legacySavedImages;
+
+    if (sourceImages.length) {
+      uploadedReferenceImages = sourceImages.map((image, index) => ({
         ...image,
         tag: normalizeTag(image.tag, `@img${index + 1}`)
       }));
     }
 
+    if (!savedImagesFromDb.length && legacySavedImages.length) {
+      await saveReferenceImagesToDb(uploadedReferenceImages);
+      chrome.storage.local.remove('savedUploadedReferenceImages');
+    }
+
+    if (savedCharacterRefsFromDb.length) {
+      capturedCharacterReferences = savedCharacterRefsFromDb;
+    }
+
+    if (savedLocationRefsFromDb.length) {
+      capturedLocationReferences = savedLocationRefsFromDb;
+    }
+
     renderUploadedImages();
+    renderCharacterReferences();
+    renderLocationReferences();
     setActiveTab(result.savedActiveTab || 'character');
+    setActiveSubTab(result.savedActiveSubTab || 'image-character');
+    mainView.classList.add('loaded');
+  }).catch((error) => {
+    console.error('Failed to restore popup state:', error);
+    renderUploadedImages();
+    renderCharacterReferences();
+    renderLocationReferences();
+    setActiveTab('character');
+    setActiveSubTab('image-character');
+    mainView.classList.add('loaded');
   });
 
   chrome.runtime.sendMessage({ action: 'get_state' }, (state) => {
@@ -235,11 +706,6 @@ document.addEventListener('DOMContentLoaded', () => {
       stopBtn.style.display = 'block';
       stopBtn.disabled = false;
       statusBox.textContent = state.status;
-
-      let runningTab = 'character';
-      if (state.colLetter === 'F') runningTab = 'location';
-      if (state.colLetter === 'G') runningTab = 'image';
-      setActiveTab(runningTab);
     } else if (state && state.status) {
       statusBox.textContent = state.status;
     }
@@ -247,15 +713,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   startFromInput.addEventListener('input', () => {
     if (startFromInput.value) singlePromptInput.value = '';
-    saveInputs();
+    void saveInputs();
   });
 
   singlePromptInput.addEventListener('input', () => {
     if (singlePromptInput.value) startFromInput.value = '';
-    saveInputs();
+    void saveInputs();
   });
 
-  locationRefNumInput.addEventListener('input', saveInputs);
+  locationRefNumInput.addEventListener('input', () => {
+    void saveInputs();
+  });
 
   settingsBtn.addEventListener('click', () => {
     mainView.style.display = 'none';
@@ -333,14 +801,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const locationRefVal = parseInt(locationRefNumInput.value, 10);
       const locationRefNum = Number.isNaN(locationRefVal) ? null : locationRefVal;
 
+      await persistActiveWorkflowImages(buildUploadedReferencePayload());
+
       chrome.runtime.sendMessage({
         action: 'start_workflow',
         prompts: promptsToProcess,
         startIndexOffset: startIndex,
         baseUrl: 'https://www.magnific.com/app/ai-image-generator#from_element=mainmenu&from_view=pinned_tool',
         colLetter,
-        locationRefNum,
-        uploadedReferenceImages: buildUploadedReferencePayload()
+        locationRefNum
       });
     } catch (err) {
       statusBox.textContent = err.message;
@@ -362,6 +831,34 @@ document.addEventListener('DOMContentLoaded', () => {
         startBtn.disabled = false;
         stopBtn.style.display = 'none';
         stopBtn.disabled = false;
+      }
+    } else if (message.action === 'character_reference_added') {
+      const { name, dataUrl } = message;
+      const exists = capturedCharacterReferences.find(c => c.name && c.name.toLowerCase() === name.toLowerCase());
+      if (!exists) {
+        const tag = getNextCharacterTag();
+        capturedCharacterReferences.push({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          tag,
+          name,
+          dataUrl
+        });
+        renderCharacterReferences();
+        saveCharacterReferencesToDb(capturedCharacterReferences).catch(console.error);
+      }
+    } else if (message.action === 'location_reference_added') {
+      const { name, dataUrl } = message;
+      const exists = capturedLocationReferences.find(c => c.name && c.name.toLowerCase() === name.toLowerCase());
+      if (!exists) {
+        const tag = getNextLocationTag();
+        capturedLocationReferences.push({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          tag,
+          name,
+          dataUrl
+        });
+        renderLocationReferences();
+        saveLocationReferencesToDb(capturedLocationReferences).catch(console.error);
       }
     }
   });
