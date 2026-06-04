@@ -97,7 +97,7 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   }
 
   if (currentStepAborted) throw new Error('Aborted by user');
-  const promptInput = document.querySelector(promptInputSelector);
+  const promptInput = await waitForPromptInput(promptInputSelector, 15000, 250);
   if (!promptInput) throw new Error('Prompt input not found');
 
   await reportProgress('writing prompt');
@@ -578,6 +578,100 @@ async function waitForEnabledElement(selector, timeoutMs, pollMs) {
   }
 
   return document.querySelector(selector);
+}
+
+async function waitForPromptInput(primarySelector, timeoutMs, pollMs) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (currentStepAborted) {
+      throw new Error('Aborted by user');
+    }
+
+    const promptInput = findPromptInput(primarySelector);
+    if (promptInput) {
+      return promptInput;
+    }
+
+    await sleep(pollMs);
+  }
+
+  return findPromptInput(primarySelector);
+}
+
+function findPromptInput(primarySelector) {
+  const selectors = [
+    primarySelector,
+    '[data-cy="prompt-editor"] [contenteditable="true"]',
+    '[data-cy="prompt-input"] [contenteditable="true"]',
+    '[contenteditable="true"][role="textbox"]',
+    '[contenteditable="true"][data-lexical-editor="true"]',
+    'div[contenteditable="true"]'
+  ];
+
+  let bestMatch = null;
+  let bestScore = -1;
+
+  for (const selector of selectors) {
+    const candidates = Array.from(document.querySelectorAll(selector));
+    for (const candidate of candidates) {
+      const score = scorePromptInput(candidate);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = candidate;
+      }
+    }
+  }
+
+  return bestScore >= 20 ? bestMatch : null;
+}
+
+function scorePromptInput(element) {
+  if (!element || isElementDisabled(element)) {
+    return -1;
+  }
+
+  const rect = element.getBoundingClientRect();
+  if (rect.width < 40 || rect.height < 20) {
+    return -1;
+  }
+
+  const style = window.getComputedStyle(element);
+  if (!style || style.visibility === 'hidden' || style.display === 'none') {
+    return -1;
+  }
+
+  let score = 20;
+
+  const text = [
+    element.getAttribute('aria-label') || '',
+    element.getAttribute('data-placeholder') || '',
+    element.getAttribute('placeholder') || ''
+  ].join(' ').toLowerCase();
+
+  if (text.includes('prompt')) {
+    score += 80;
+  }
+
+  if (element.classList.contains('dynamic-prompt')) {
+    score += 100;
+  }
+
+  if (element.getAttribute('role') === 'textbox') {
+    score += 20;
+  }
+
+  if (element.getAttribute('data-lexical-editor') === 'true') {
+    score += 20;
+  }
+
+  if (document.querySelector('button[data-cy="generate-button"]')) {
+    score += 10;
+  }
+
+  score += Math.min(30, Math.round((rect.width * rect.height) / 10000));
+
+  return score;
 }
 
 function isElementDisabled(element) {
