@@ -32,7 +32,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.prompt,
       message.promptNumber,
       Array.isArray(message.uploadedReferenceImages) ? message.uploadedReferenceImages : [],
-      message.locationRefNum || null
+      message.locationRefNum || null,
+      message.workflowType || 'image'
     )
       .then(() => {
         isExecuting = false;
@@ -58,7 +59,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceImages, locationRefNum) {
+async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceImages, locationRefNum, workflowType) {
   const promptInputSelector = 'div[contenteditable="true"].dynamic-prompt';
   const clearBtnSelector = 'button[data-cy="clear-prompt-button"]';
   const generateBtnSelector = 'button[data-cy="generate-button"]';
@@ -199,6 +200,14 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   const downloadResponse = await waitForDownloadCompletion();
   if (!downloadResponse || !downloadResponse.success) {
     throw new Error(downloadResponse && downloadResponse.error ? downloadResponse.error : 'Download did not complete');
+  }
+
+  if (workflowType === 'character' || workflowType === 'location') {
+    try {
+      await autoCaptureGeneratedReference(workflowType, promptText, promptNumber, thumbnailImg);
+    } catch (error) {
+      console.warn(`Failed to auto-capture ${workflowType} reference:`, error);
+    }
   }
 
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
@@ -792,4 +801,91 @@ async function addReferenceImageFromReference(referenceImage, fileName, promptIn
   }
 
   return addReferenceImageFromUrl(resolvedReference.dataUrl, fileName, promptInputSelector);
+}
+
+async function autoCaptureGeneratedReference(workflowType, promptText, promptNumber, thumbnailImg) {
+  const imageSrc = getBestGeneratedImageSrc(thumbnailImg);
+  const extractedName = extractReferenceNameFromPrompt(workflowType, promptText, promptNumber);
+
+  if (!imageSrc || !extractedName) {
+    return;
+  }
+
+  let dataUrl = imageSrc;
+  try {
+    dataUrl = await imageUrlToDataUrl(imageSrc);
+  } catch (error) {
+    console.warn('Falling back to raw image URL for auto-captured reference:', error);
+  }
+  const action = workflowType === 'character'
+    ? 'character_reference_added'
+    : 'location_reference_added';
+
+  await sendRuntimeMessage({
+    action,
+    name: extractedName,
+    dataUrl
+  });
+}
+
+function getBestGeneratedImageSrc(thumbnailImg) {
+  if (thumbnailImg) {
+    const preferredSrc = thumbnailImg.currentSrc || thumbnailImg.src;
+    if (preferredSrc) {
+      return preferredSrc;
+    }
+  }
+
+  return getLatestGeneratedImageSrc();
+}
+
+function extractReferenceNameFromPrompt(workflowType, promptText, promptNumber) {
+  const rawPrompt = String(promptText || '').trim();
+  if (!rawPrompt) {
+    return `${workflowType}_${promptNumber}`;
+  }
+
+  if (workflowType === 'character') {
+    const baseCharacterMatch = rawPrompt.match(/^([^:(]+?)\s*\(/);
+    if (baseCharacterMatch) {
+      return baseCharacterMatch[1].trim();
+    }
+  }
+
+  if (workflowType === 'location') {
+    const locationMatch = rawPrompt.match(/^(\[[^\]]+\])/);
+    if (locationMatch) {
+      return locationMatch[1].trim();
+    }
+  }
+
+  const simplifiedPrompt = rawPrompt
+    .replace(/@\w+\s+as\s+/gi, '')
+    .replace(/@\w+/gi, '')
+    .trim();
+
+  const extractedName = simplifiedPrompt
+    .split(/[:;]/)[0]
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim();
+  return extractedName || `${workflowType}_${promptNumber}`;
+}
+
+async function imageUrlToDataUrl(imageUrl) {
+  const response = await fetch(imageUrl, { credentials: 'include' });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch generated image: ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  return blobToDataUrl(blob);
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Failed to convert image blob to data URL'));
+    reader.readAsDataURL(blob);
+  });
 }

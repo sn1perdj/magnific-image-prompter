@@ -3,6 +3,8 @@ const MAX_RECOVERY_ATTEMPTS = 5;
 const REFERENCE_IMAGE_DB_NAME = 'magnificAutomatorDb';
 const REFERENCE_IMAGE_STORE = 'referenceImages';
 const ACTIVE_WORKFLOW_IMAGES_KEY = 'active-workflow-images';
+const SAVED_CHARACTER_REFERENCES_KEY = 'saved-character-images';
+const SAVED_LOCATION_REFERENCES_KEY = 'saved-location-images';
 let restoreStarted = false;
 let pendingDownload = null;
 
@@ -166,25 +168,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   } else if (message.action === 'character_reference_added' || message.action === 'location_reference_added') {
-    chrome.runtime.sendMessage(message).catch(() => {});
-    loadActiveWorkflowImages().then((currentImages) => {
-      const exists = currentImages.find(img => img.name && img.name.toLowerCase() === message.name.toLowerCase());
-      if (!exists) {
-        const usedTags = new Set(currentImages.map(img => String(img.tag || '').trim().toLowerCase()));
-        let candidateNumber = 1;
-        while (usedTags.has(`@img${candidateNumber}`)) {
-          candidateNumber++;
-        }
-        const newTag = `@img${candidateNumber}`;
-        currentImages.push({
-          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          tag: newTag,
-          name: message.name,
-          dataUrl: message.dataUrl
-        });
-        persistActiveWorkflowImages(currentImages).catch(console.error);
-      }
-    }).catch(console.error);
+    if (!message.forwardedByBackground) {
+      chrome.runtime.sendMessage({ ...message, forwardedByBackground: true }).catch(() => {});
+    }
+
+    persistAutoCapturedReference(message).catch(console.error);
     sendResponse({ ok: true });
     return true;
   }
@@ -490,33 +478,96 @@ function openReferenceImageDb() {
 }
 
 async function persistActiveWorkflowImages(images) {
+  return persistStoredImages(ACTIVE_WORKFLOW_IMAGES_KEY, images, 'Failed to persist workflow images');
+}
+
+async function loadActiveWorkflowImages() {
+  return loadStoredImages(ACTIVE_WORKFLOW_IMAGES_KEY, 'Failed to load workflow images');
+}
+
+async function persistStoredImages(storageKey, images, errorMessage) {
   const db = await openReferenceImageDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readwrite');
     const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
-    store.put(images, ACTIVE_WORKFLOW_IMAGES_KEY);
+    store.put(images, storageKey);
 
     transaction.oncomplete = () => {
       db.close();
       resolve();
     };
-    transaction.onabort = () => reject(transaction.error || new Error('Failed to persist workflow images'));
-    transaction.onerror = () => reject(transaction.error || new Error('Failed to persist workflow images'));
+    transaction.onabort = () => reject(transaction.error || new Error(errorMessage));
+    transaction.onerror = () => reject(transaction.error || new Error(errorMessage));
   });
 }
 
-async function loadActiveWorkflowImages() {
+async function loadStoredImages(storageKey, errorMessage) {
   const db = await openReferenceImageDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
     const store = transaction.objectStore(REFERENCE_IMAGE_STORE);
-    const request = store.get(ACTIVE_WORKFLOW_IMAGES_KEY);
+    const request = store.get(storageKey);
 
     request.onsuccess = () => {
       resolve(Array.isArray(request.result) ? request.result : []);
     };
-    request.onerror = () => reject(request.error || new Error('Failed to load workflow images'));
+    request.onerror = () => reject(request.error || new Error(errorMessage));
     transaction.oncomplete = () => db.close();
-    transaction.onabort = () => reject(transaction.error || new Error('Failed to load workflow images'));
+    transaction.onabort = () => reject(transaction.error || new Error(errorMessage));
   });
+}
+
+async function persistAutoCapturedReference(message) {
+  const name = String(message.name || '').trim();
+  const dataUrl = String(message.dataUrl || '').trim();
+  const action = message.action;
+
+  if (!name || !dataUrl || (action !== 'character_reference_added' && action !== 'location_reference_added')) {
+    return;
+  }
+
+  const targetKey = action === 'character_reference_added'
+    ? SAVED_CHARACTER_REFERENCES_KEY
+    : SAVED_LOCATION_REFERENCES_KEY;
+
+  const [currentImages, savedImages] = await Promise.all([
+    loadStoredImages(ACTIVE_WORKFLOW_IMAGES_KEY, 'Failed to load workflow images'),
+    loadStoredImages(targetKey, 'Failed to load saved auto-captured references')
+  ]);
+
+  const existingWorkflowImage = currentImages.find((img) => img.name && img.name.toLowerCase() === name.toLowerCase());
+  const referenceId = existingWorkflowImage
+    ? existingWorkflowImage.id
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  if (!existingWorkflowImage) {
+    const usedTags = new Set(currentImages.map((img) => String(img.tag || '').trim().toLowerCase()));
+    let candidateNumber = 1;
+    while (usedTags.has(`@img${candidateNumber}`)) {
+      candidateNumber++;
+    }
+
+    currentImages.push({
+      id: referenceId,
+      tag: `@img${candidateNumber}`,
+      name,
+      dataUrl
+    });
+  }
+
+  const savedExists = savedImages.find((img) => img.name && img.name.toLowerCase() === name.toLowerCase());
+  if (!savedExists) {
+    const nextTag = `@img${savedImages.length + 1}`;
+    savedImages.push({
+      id: referenceId,
+      tag: nextTag,
+      name,
+      dataUrl
+    });
+  }
+
+  await Promise.all([
+    persistStoredImages(ACTIVE_WORKFLOW_IMAGES_KEY, currentImages, 'Failed to persist workflow images'),
+    persistStoredImages(targetKey, savedImages, 'Failed to persist saved auto-captured references')
+  ]);
 }

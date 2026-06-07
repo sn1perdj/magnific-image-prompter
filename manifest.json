@@ -13,7 +13,9 @@
     "downloads"
   ],
   "host_permissions": [
-    "*://*.magnific.com/*"
+    "*://*.magnific.com/*",
+    "https://*/*",
+    "http://*/*"
   ],
   "content_scripts": [
     {
