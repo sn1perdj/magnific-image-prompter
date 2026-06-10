@@ -104,19 +104,12 @@ async function executeWorkflowStep(promptText, promptNumber, uploadedReferenceIm
   await reportProgress('writing prompt');
   await setPromptEditorText(promptInput, finalPromptText);
 
-  await sleep(1000);
-
-  const promptTextAfterInsert = getPromptEditorText(promptInput);
-  if (!promptTextAfterInsert || promptTextAfterInsert.length < Math.min(10, finalPromptText.length)) {
-    throw new Error('Prompt text was not inserted into Magnific');
-  }
-
   const previousFirstItem = document.querySelector(feedItemSelector);
   const previousItemId = previousFirstItem ? previousFirstItem.getAttribute('data-item') : null;
 
   if (currentStepAborted) throw new Error('Aborted by user');
   await reportProgress('waiting for generate button');
-  const generateBtn = await waitForEnabledElement(generateBtnSelector, 15000, 250);
+  const generateBtn = await ensureGenerateButtonReady(promptInput, finalPromptText, generateBtnSelector);
   if (!generateBtn) throw new Error('Generate button not found');
   if (isElementDisabled(generateBtn)) {
     throw new Error('Generate button is disabled after prompt insertion');
@@ -532,7 +525,13 @@ function sendRuntimeMessage(message) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const runtimeError = chrome.runtime.lastError.message || 'Unknown runtime error';
+        if (runtimeError.includes('Extension context invalidated')) {
+          reject(new Error('Extension context invalidated. Please reload the extension and restart the workflow.'));
+          return;
+        }
+
+        reject(new Error(runtimeError));
         return;
       }
 
@@ -587,6 +586,37 @@ async function waitForEnabledElement(selector, timeoutMs, pollMs) {
   }
 
   return document.querySelector(selector);
+}
+
+async function ensureGenerateButtonReady(promptInput, text, selector) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (currentStepAborted) {
+      throw new Error('Aborted by user');
+    }
+
+    await sleep(1000);
+
+    const promptTextAfterInsert = getPromptEditorText(promptInput);
+    if (!promptTextAfterInsert || promptTextAfterInsert.length < Math.min(10, text.length)) {
+      await setPromptEditorText(promptInput, text);
+      continue;
+    }
+
+    const generateBtn = await waitForEnabledElement(selector, 10000, 250);
+    if (generateBtn && !isElementDisabled(generateBtn)) {
+      return generateBtn;
+    }
+
+    dispatchPromptInputEvents(promptInput);
+    promptInput.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+    promptInput.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true }));
+    promptInput.blur();
+    await sleep(250);
+    promptInput.focus();
+    await setPromptEditorText(promptInput, text);
+  }
+
+  return waitForEnabledElement(selector, 5000, 250);
 }
 
 async function waitForPromptInput(primarySelector, timeoutMs, pollMs) {
@@ -767,21 +797,39 @@ async function setPromptEditorText(promptInput, text) {
 }
 
 function dispatchPromptInputEvents(promptInput) {
+  const text = promptInput.textContent || '';
+
   promptInput.dispatchEvent(new InputEvent('beforeinput', {
     bubbles: true,
     cancelable: true,
-    data: promptInput.textContent || '',
+    data: text,
     inputType: 'insertText'
   }));
 
   promptInput.dispatchEvent(new InputEvent('input', {
     bubbles: true,
     cancelable: true,
-    data: promptInput.textContent || '',
+    data: text,
     inputType: 'insertText'
   }));
 
   promptInput.dispatchEvent(new Event('change', {
+    bubbles: true
+  }));
+
+  promptInput.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'Enter',
+    code: 'Enter',
+    bubbles: true
+  }));
+
+  promptInput.dispatchEvent(new KeyboardEvent('keyup', {
+    key: 'Enter',
+    code: 'Enter',
+    bubbles: true
+  }));
+
+  promptInput.dispatchEvent(new Event('blur', {
     bubbles: true
   }));
 }
@@ -852,21 +900,27 @@ function extractReferenceNameFromPrompt(workflowType, promptText, promptNumber) 
     }
   }
 
-  if (workflowType === 'location') {
-    const locationMatch = rawPrompt.match(/^(\[[^\]]+\])/);
-    if (locationMatch) {
-      return locationMatch[1].trim();
-    }
-  }
-
   const simplifiedPrompt = rawPrompt
     .replace(/@\w+\s+as\s+/gi, '')
     .replace(/@\w+/gi, '')
     .trim();
 
+  if (workflowType === 'location') {
+    const bracketMatch = simplifiedPrompt.match(/^\[([^\]]+)\]/);
+    if (bracketMatch) {
+      return bracketMatch[1].trim();
+    }
+
+    const leadingLocationMatch = simplifiedPrompt.match(/^([^:;([|]{3,80}?)(?:\s*(?:\(|\[|:|;|,)|$)/);
+    if (leadingLocationMatch) {
+      return leadingLocationMatch[1].trim();
+    }
+  }
+
   const extractedName = simplifiedPrompt
     .split(/[:;]/)[0]
     .replace(/\s*\([^)]*\)\s*$/, '')
+    .replace(/^\[|\]$/g, '')
     .trim();
   return extractedName || `${workflowType}_${promptNumber}`;
 }

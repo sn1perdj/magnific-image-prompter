@@ -5,6 +5,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const SAVED_CHARACTER_REFERENCES_KEY = 'saved-character-images';
   const SAVED_LOCATION_REFERENCES_KEY = 'saved-location-images';
   const ACTIVE_WORKFLOW_IMAGES_KEY = 'active-workflow-images';
+  const MAX_REFERENCE_IMAGE_EDGE = 1600;
+  const MAX_REFERENCE_THUMB_EDGE = 240;
+  const REFERENCE_IMAGE_QUALITY = 0.82;
+  const MAX_RENDERED_IMAGES_PER_SECTION = 40;
 
   const mainView = document.getElementById('mainView');
   const settingsView = document.getElementById('settingsView');
@@ -247,6 +251,45 @@ document.addEventListener('DOMContentLoaded', () => {
     return `@${normalized}`;
   }
 
+  function extractReferenceNameFromPromptText(type, promptText, fallbackName = '') {
+    const rawPrompt = String(promptText || '').trim();
+    if (!rawPrompt) {
+      return fallbackName;
+    }
+
+    if (type === 'character') {
+      const characterMatch = rawPrompt.match(/([A-Z][a-zA-Z0-9\s.\'-]+ \([^)]+\))/);
+      if (characterMatch) {
+        return characterMatch[1].trim();
+      }
+    }
+
+    const simplifiedPrompt = rawPrompt
+      .replace(/@\w+\s+as\s+/gi, '')
+      .replace(/@\w+/gi, '')
+      .trim();
+
+    if (type === 'location') {
+      const bracketMatch = simplifiedPrompt.match(/^\[([^\]]+)\]/);
+      if (bracketMatch) {
+        return bracketMatch[1].trim();
+      }
+
+      const leadingLocationMatch = simplifiedPrompt.match(/^([^:;([|]{3,80}?)(?:\s*(?:\(|\[|:|;|,)|$)/);
+      if (leadingLocationMatch) {
+        return leadingLocationMatch[1].trim();
+      }
+    }
+
+    const extractedName = simplifiedPrompt
+      .split(/[:;]/)[0]
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .replace(/^\[|\]$/g, '')
+      .trim();
+
+    return extractedName || fallbackName;
+  }
+
   function getNextDefaultTag() {
     const usedTags = new Set(
       uploadedReferenceImages.map((image) => normalizeTag(image.tag, '@img1'))
@@ -303,7 +346,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const thumb = document.createElement('img');
       thumb.className = 'image-thumb';
-      thumb.src = image.dataUrl;
+      thumb.src = image.thumbDataUrl || image.dataUrl;
       thumb.alt = image.tag;
 
       const meta = document.createElement('div');
@@ -350,7 +393,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const thumb = document.createElement('img');
       thumb.className = 'image-thumb';
-      thumb.src = image.dataUrl;
+      thumb.src = image.thumbDataUrl || image.dataUrl;
       thumb.alt = image.tag;
 
       const meta = document.createElement('div');
@@ -398,14 +441,21 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    images.forEach((image) => {
+    if (images.length > MAX_RENDERED_IMAGES_PER_SECTION) {
+      const notice = document.createElement('div');
+      notice.className = 'image-tag-empty';
+      notice.textContent = `Showing first ${MAX_RENDERED_IMAGES_PER_SECTION} of ${images.length} ${type} references to keep the popup responsive.`;
+      container.appendChild(notice);
+    }
+
+    images.slice(0, MAX_RENDERED_IMAGES_PER_SECTION).forEach((image) => {
       const index = uploadedReferenceImages.indexOf(image);
       const item = document.createElement('div');
       item.className = 'image-tag-item';
 
       const thumb = document.createElement('img');
       thumb.className = 'image-thumb';
-      thumb.src = image.dataUrl;
+      thumb.src = image.thumbDataUrl || image.dataUrl;
       thumb.alt = image.tag;
 
       const meta = document.createElement('div');
@@ -444,6 +494,57 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function loadImageElement(src) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Failed to decode image'));
+      image.src = src;
+    });
+  }
+
+  function scaleDimensions(width, height, maxEdge) {
+    if (!width || !height || Math.max(width, height) <= maxEdge) {
+      return { width, height };
+    }
+
+    const ratio = maxEdge / Math.max(width, height);
+    return {
+      width: Math.max(1, Math.round(width * ratio)),
+      height: Math.max(1, Math.round(height * ratio))
+    };
+  }
+
+  function renderImageToDataUrl(image, maxEdge) {
+    const { width, height } = scaleDimensions(image.naturalWidth || image.width, image.naturalHeight || image.height, maxEdge);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d', { alpha: false });
+    context.drawImage(image, 0, 0, width, height);
+
+    return canvas.toDataURL('image/jpeg', REFERENCE_IMAGE_QUALITY);
+  }
+
+  async function optimizeImageFile(file) {
+    const originalDataUrl = await fileToDataUrl(file);
+
+    try {
+      const image = await loadImageElement(originalDataUrl);
+      return {
+        dataUrl: renderImageToDataUrl(image, MAX_REFERENCE_IMAGE_EDGE),
+        thumbDataUrl: renderImageToDataUrl(image, MAX_REFERENCE_THUMB_EDGE)
+      };
+    } catch (error) {
+      console.warn(`Falling back to original image for ${file.name}:`, error);
+      return {
+        dataUrl: originalDataUrl,
+        thumbDataUrl: originalDataUrl
+      };
+    }
+  }
+
   async function handleImageFiles(fileList, type) {
     const files = Array.from(fileList || []);
     if (files.length === 0) {
@@ -451,18 +552,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     for (const file of files) {
-      const dataUrl = await fileToDataUrl(file);
+      statusBox.textContent = `Optimizing ${file.name}...`;
+      const optimizedImage = await optimizeImageFile(file);
       uploadedReferenceImages.push({
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         tag: getNextDefaultTag(),
         name: file.name,
         type: type,
-        dataUrl
+        dataUrl: optimizedImage.dataUrl,
+        thumbDataUrl: optimizedImage.thumbDataUrl
       });
     }
 
     renderUploadedImages();
     await saveInputs();
+    statusBox.textContent = `Added ${files.length} ${type} reference image${files.length === 1 ? '' : 's'}.`;
   }
 
   function buildUploadedReferencePayload() {
@@ -485,7 +589,9 @@ document.addEventListener('DOMContentLoaded', () => {
         id: image.id,
         tag: normalizeTag(image.tag, `@img${index + 1}`),
         name: image.name,
-        dataUrl: image.dataUrl
+        dataUrl: image.dataUrl,
+        thumbDataUrl: image.thumbDataUrl,
+        type: image.type
       }));
     }
   }
@@ -601,14 +707,7 @@ document.addEventListener('DOMContentLoaded', () => {
            const num = parseInt(numMatch[1], 10);
            const rowIndex = num - 1;
            if (prompts[rowIndex]) {
-             let extractedName = prompts[rowIndex].split(/[:;]/)[0].trim();
-             
-             if (type === 'character') {
-               const charMatch = prompts[rowIndex].match(/([A-Z][a-zA-Z0-9\s.\'-]+ \([^)]+\))/);
-               if (charMatch) {
-                 extractedName = charMatch[1].trim();
-               }
-             }
+             const extractedName = extractReferenceNameFromPromptText(type, prompts[rowIndex], img.name);
              
              if (extractedName) {
                img.name = extractedName;

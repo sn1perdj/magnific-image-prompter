@@ -7,10 +7,12 @@ const SAVED_CHARACTER_REFERENCES_KEY = 'saved-character-images';
 const SAVED_LOCATION_REFERENCES_KEY = 'saved-location-images';
 let restoreStarted = false;
 let pendingDownload = null;
+const imageCache = new Map();
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (pendingDownload && pendingDownload.expectedFilename) {
     pendingDownload.downloadId = item.id;
+    pendingDownload.suggestedFilename = pendingDownload.expectedFilename;
     suggest({
       filename: pendingDownload.expectedFilename,
       conflictAction: 'overwrite'
@@ -159,7 +161,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             id: image.id,
             tag: image.tag,
             name: image.name,
-            dataUrl: image.dataUrl
+            dataUrl: image.dataUrl,
+            thumbDataUrl: image.thumbDataUrl
           }
         });
       })
@@ -350,6 +353,7 @@ function preparePendingDownload(filename, promptNumber) {
     expectedFilename: filename,
     expectedPromptNumber: String(promptNumber || '').trim(),
     downloadId: null,
+    suggestedFilename: null,
     result: null,
     waiters: [],
     timeoutId: setTimeout(() => {
@@ -404,19 +408,19 @@ function finalizePendingDownload(downloadId) {
     const actualFilename = getBasename(item.filename || item.finalUrl || '');
     const expectedFilename = pendingDownload ? getBasename(pendingDownload.expectedFilename) : '';
     const expectedPromptNumber = pendingDownload ? pendingDownload.expectedPromptNumber : '';
-    const actualFileNumber = actualFilename.replace(/\.[^.]+$/, '');
 
-    if (actualFilename !== expectedFilename || actualFileNumber !== expectedPromptNumber) {
-      failPendingDownload(
-        `Downloaded file mismatch. Expected ${expectedFilename} for prompt ${expectedPromptNumber}, got ${actualFilename}`
+    if (actualFilename !== expectedFilename) {
+      console.warn(
+        `Download completed with original filename "${actualFilename}" instead of expected "${expectedFilename}" for prompt ${expectedPromptNumber}.`
       );
-      return;
     }
 
     pendingDownload.result = {
       success: true,
-      filename: actualFilename,
-      promptNumber: expectedPromptNumber
+      filename: expectedFilename || actualFilename,
+      actualFilename,
+      promptNumber: expectedPromptNumber,
+      renamed: actualFilename === expectedFilename
     };
     const waiters = pendingDownload.waiters.splice(0, pendingDownload.waiters.length);
     for (const respond of waiters) {
@@ -493,6 +497,7 @@ async function persistStoredImages(storageKey, images, errorMessage) {
     store.put(images, storageKey);
 
     transaction.oncomplete = () => {
+      imageCache.set(storageKey, Array.isArray(images) ? images : []);
       db.close();
       resolve();
     };
@@ -502,6 +507,10 @@ async function persistStoredImages(storageKey, images, errorMessage) {
 }
 
 async function loadStoredImages(storageKey, errorMessage) {
+  if (imageCache.has(storageKey)) {
+    return imageCache.get(storageKey);
+  }
+
   const db = await openReferenceImageDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(REFERENCE_IMAGE_STORE, 'readonly');
@@ -509,7 +518,9 @@ async function loadStoredImages(storageKey, errorMessage) {
     const request = store.get(storageKey);
 
     request.onsuccess = () => {
-      resolve(Array.isArray(request.result) ? request.result : []);
+      const images = Array.isArray(request.result) ? request.result : [];
+      imageCache.set(storageKey, images);
+      resolve(images);
     };
     request.onerror = () => reject(request.error || new Error(errorMessage));
     transaction.oncomplete = () => db.close();
